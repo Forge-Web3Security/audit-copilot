@@ -79,6 +79,18 @@ def _body_notes(source: str) -> list[str]:
     if "totalassets()" in lowered or "balanceof(address(this))" in lowered:
         notes.append("uses live asset balance")
 
+    if "address(this).balance" in lowered:
+        notes.append("uses native address(this).balance")
+
+    if "ecrecover" in lowered:
+        notes.append("uses ecrecover")
+
+    if ("for (" in lowered or "for(" in lowered) and ".length" in lowered:
+        notes.append("has loop over dynamic length")
+
+    if "selfdestruct" in lowered:
+        notes.append("uses selfdestruct")
+
     return notes
 
 

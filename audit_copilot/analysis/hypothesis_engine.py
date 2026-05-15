@@ -1308,3 +1308,213 @@ def _generate_v38(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[H
 
 
 HypothesisEngine.generate = _generate_v38
+
+# --- v3.9 batch detectors: signature replay, forced ETH accounting, unbounded loop DoS ---
+
+_ORIGINAL_GENERATE_V39 = HypothesisEngine.generate
+
+
+def _v39_signature_replay_hypotheses(functions: list[FunctionSignal]) -> list[Hypothesis]:
+    out: list[Hypothesis] = []
+
+    for fn in functions:
+        notes = " ".join(str(x).lower() for x in fn.raw.get("notes", []))
+        joined = " ".join([
+            fn.name.lower(),
+            fn.contract.lower(),
+            notes,
+            " ".join(fn.reads).lower(),
+            " ".join(fn.writes).lower(),
+            str(fn.raw).lower(),
+        ])
+
+        uses_signature = "uses ecrecover" in notes or "ecrecover" in joined
+        has_replay_guard = any(
+            term in joined
+            for term in (
+                "nonce",
+                "nonces",
+                "usedsignature",
+                "usedsignatures",
+                "useddigest",
+                "useddigests",
+                "deadline",
+                "domainseparator",
+                "chainid",
+            )
+        )
+
+        if not (fn.is_public_entrypoint and uses_signature and not has_replay_guard):
+            continue
+
+        out.append(
+            Hypothesis(
+                id=_hid("signature-replay", fn.fq_name),
+                title="Signature authorization may be replayable",
+                severity_guess="high",
+                confidence=0.70,
+                affected_contracts=[fn.contract],
+                related_functions=[fn.fq_name],
+                related_state=sorted(set([*fn.reads, *fn.writes])),
+                invariant="Signed authorizations should be bound to a nonce, domain/chain, action, and replay protection.",
+                attack_preconditions=[
+                    "The function verifies a signature or recovered signer.",
+                    "No nonce, used-signature tracking, deadline, chain/domain separator, or equivalent replay guard was detected.",
+                ],
+                exploit_sketch=[
+                    "Obtain or observe a valid signature for one authorized action.",
+                    f"Call {fn.fq_name} with the same signature more than once or in another valid context.",
+                    "Repeat the authorized effect such as claim, mint, transfer, or role action.",
+                ],
+                validation_steps=[
+                    "Write a test that calls the signed function twice with identical v/r/s and payload.",
+                    "Check whether state changes twice.",
+                    "Confirm whether chainId/domain/nonce/deadline are part of the signed digest.",
+                ],
+                contest_validity_notes=[
+                    "Strong when replay causes asset movement, minting, claims, governance action, or privilege escalation.",
+                    "Lower severity if signatures authorize idempotent actions or replay has no material effect.",
+                ],
+                evidence=[
+                    f"function={fn.fq_name}",
+                    f"notes={fn.raw.get('notes', [])}",
+                    f"reads={fn.reads}",
+                    f"writes={fn.writes}",
+                ],
+                tags=["signature", "replay", "ecrecover", "authorization"],
+            )
+        )
+
+    return out
+
+
+def _v39_forced_eth_accounting_hypotheses(functions: list[FunctionSignal]) -> list[Hypothesis]:
+    out: list[Hypothesis] = []
+    accounting_terms = ("totaldeposit", "accounted", "internalbalance", "balance", "debt", "reserve")
+
+    for fn in functions:
+        notes = " ".join(str(x).lower() for x in fn.raw.get("notes", []))
+        joined_state = " ".join([*fn.reads, *fn.writes]).lower()
+        joined = " ".join([fn.name.lower(), fn.contract.lower(), notes, joined_state, str(fn.raw).lower()])
+
+        uses_native_balance = "uses native address(this).balance" in notes or "address(this).balance" in joined
+        has_accounting_state = any(term in joined_state for term in accounting_terms)
+
+        if not (fn.is_public_entrypoint and uses_native_balance and has_accounting_state):
+            continue
+
+        out.append(
+            Hypothesis(
+                id=_hid("forced-eth-accounting", fn.fq_name),
+                title="Native ETH accounting may be breakable by forced ETH",
+                severity_guess="medium",
+                confidence=0.66,
+                affected_contracts=[fn.contract],
+                related_functions=[fn.fq_name],
+                related_state=sorted(set([*fn.reads, *fn.writes])),
+                invariant="Protocol accounting should not assume address(this).balance only changes through controlled deposit/withdraw paths.",
+                attack_preconditions=[
+                    "The contract compares or derives accounting from address(this).balance.",
+                    "The contract also maintains internal deposit/accounting state.",
+                    "ETH can be forcibly sent via selfdestruct or other protocol-level balance changes.",
+                ],
+                exploit_sketch=[
+                    "Force ETH into the contract without calling deposit.",
+                    f"Call {fn.fq_name} or an accounting-sensitive function.",
+                    "Observe accounting drift, withdrawal lock, unfair surplus handling, or invariant failure.",
+                ],
+                validation_steps=[
+                    "Deploy an attacker contract that selfdestructs to the target.",
+                    "Check whether totalDeposits/accounted assets diverge from raw balance.",
+                    "Test withdrawals, surplus calculation, and invariant checks after forced ETH.",
+                ],
+                contest_validity_notes=[
+                    "Strong when forced ETH causes fund loss, locked withdrawals, unfair distribution, or broken invariant enforcement.",
+                    "Usually lower severity if extra ETH is harmless and no user/protocol action depends on exact raw balance equality.",
+                ],
+                evidence=[
+                    f"function={fn.fq_name}",
+                    f"notes={fn.raw.get('notes', [])}",
+                    f"reads={fn.reads}",
+                    f"writes={fn.writes}",
+                ],
+                tags=["forced-eth", "accounting", "selfdestruct", "native-balance"],
+            )
+        )
+
+    return out
+
+
+def _v39_unbounded_loop_dos_hypotheses(functions: list[FunctionSignal]) -> list[Hypothesis]:
+    out: list[Hypothesis] = []
+
+    for fn in functions:
+        notes = " ".join(str(x).lower() for x in fn.raw.get("notes", []))
+        has_unbounded_loop = "has loop over dynamic length" in notes
+        state_changing_or_asset = bool(fn.writes or fn.has_asset_movement or fn.external_calls)
+
+        if not (fn.is_public_entrypoint and has_unbounded_loop and state_changing_or_asset):
+            continue
+
+        out.append(
+            Hypothesis(
+                id=_hid("dos-unbounded-loop", fn.fq_name),
+                title="State-changing function may DoS due to unbounded loop",
+                severity_guess="medium",
+                confidence=0.68,
+                affected_contracts=[fn.contract],
+                related_functions=[fn.fq_name],
+                related_state=sorted(set([*fn.reads, *fn.writes])),
+                invariant="User-facing state-changing functions should not require processing an unbounded user-controlled collection in one transaction.",
+                attack_preconditions=[
+                    "A dynamic collection can grow without a strict upper bound.",
+                    "The function iterates over the full collection in one state-changing transaction.",
+                    "Gas cost can grow enough to make the function unusable.",
+                ],
+                exploit_sketch=[
+                    "Grow the dynamic array/list with many entries.",
+                    f"Call {fn.fq_name}.",
+                    "Observe out-of-gas failure or impractical gas cost, blocking withdrawal, distribution, or maintenance.",
+                ],
+                validation_steps=[
+                    "Add many users/items to the collection.",
+                    "Measure gas growth for the looped function.",
+                    "Confirm whether batching, pagination, or per-user pull mechanisms exist.",
+                ],
+                contest_validity_notes=[
+                    "Strong when the loop can block withdrawals, claims, liquidation, settlement, or required protocol maintenance.",
+                    "Lower severity if the loop is owner-only, bounded by design, or only affects optional views/off-chain calls.",
+                ],
+                evidence=[
+                    f"function={fn.fq_name}",
+                    f"notes={fn.raw.get('notes', [])}",
+                    f"reads={fn.reads}",
+                    f"writes={fn.writes}",
+                ],
+                tags=["dos", "gas", "unbounded-loop", "liveness"],
+            )
+        )
+
+    return out
+
+
+def _generate_v39(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[Hypothesis]:
+    functions = _extract_functions(analysis)
+    hypotheses = list(_ORIGINAL_GENERATE_V39(self, analysis))
+    existing = {h.id for h in hypotheses}
+
+    for detector in (
+        _v39_signature_replay_hypotheses,
+        _v39_forced_eth_accounting_hypotheses,
+        _v39_unbounded_loop_dos_hypotheses,
+    ):
+        for h in detector(functions):
+            if h.id not in existing:
+                hypotheses.append(h)
+                existing.add(h.id)
+
+    return _dedupe_hypotheses(_precision_filter(hypotheses))
+
+
+HypothesisEngine.generate = _generate_v39
+
