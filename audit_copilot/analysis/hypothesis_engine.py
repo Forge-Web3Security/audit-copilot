@@ -708,3 +708,217 @@ _PRICE_TERMS = (
     "curve",
     "feed",
 )
+
+# --- v3.4 primer-backed archetype injection ---
+_ORIGINAL_GENERATE_V34 = HypothesisEngine.generate
+
+
+def _v34_contains(items: list[str], *needles: str) -> bool:
+    haystack = " ".join(str(x).lower() for x in items)
+    return any(n.lower() in haystack for n in needles)
+
+
+def _v34_primer_backed_hypotheses(functions: list[FunctionSignal]) -> list[Hypothesis]:
+    """Primer-backed vault/staking exploit archetypes.
+
+    These are narrow on purpose: they should produce concrete audit prompts,
+    not a wall of generic warnings.
+    """
+    out: list[Hypothesis] = []
+
+    for fn in functions:
+        fn_name = fn.name.lower()
+        read_write = [*fn.reads, *fn.writes]
+        call_text = " ".join(fn.external_calls).lower()
+
+        is_deposit_like = any(k in fn_name for k in ("deposit", "mint", "stake", "addliquidity"))
+        is_withdraw_like = any(k in fn_name for k in ("withdraw", "redeem", "unstake", "remove"))
+        is_reward_claim = any(k in fn_name for k in ("claim", "getreward", "harvest", "collect"))
+
+        share_state = _v34_contains(read_write, "share", "shares", "totalshares", "totalsupply")
+        reward_state = _v34_contains(read_write, "reward", "rewards", "rewardrate", "lastclaim", "emission")
+        amount_state = _v34_contains(read_write, "amount", "assets", "asset", "balance")
+
+        if (
+            fn.is_public_entrypoint
+            and is_deposit_like
+            and "transferfrom" in call_text
+            and share_state
+            and amount_state
+        ):
+            out.append(
+                Hypothesis(
+                    id=_hid("fot-accounting-mismatch", fn.fq_name),
+                    title="Deposit accounting may assume transferred amount equals received amount",
+                    severity_guess="high",
+                    confidence=0.64,
+                    affected_contracts=[fn.contract],
+                    related_functions=[fn.fq_name],
+                    related_state=sorted(set(read_write)),
+                    invariant="Share/accounting updates should be based on actual tokens received, not the user-supplied transfer amount.",
+                    attack_preconditions=[
+                        "The accepted asset can be fee-on-transfer, rebasing, hook-enabled, or otherwise non-standard.",
+                        "The function uses the nominal input amount for shares/accounting instead of a balance delta.",
+                    ],
+                    exploit_sketch=[
+                        f"Use a token or mocked asset where transferFrom receives less than the requested amount in {fn.fq_name}.",
+                        "Observe shares/accounting minted from the nominal amount.",
+                        "Withdraw later against inflated accounting, pushing losses to the protocol or later users.",
+                    ],
+                    validation_steps=[
+                        "Add a mock fee-on-transfer token and rerun deposit/withdraw sequences.",
+                        "Assert actual balance delta equals the amount used for share/accounting updates.",
+                        "If the contest excludes weird tokens, confirm whether the asset is fixed/allowlisted before reporting.",
+                    ],
+                    contest_validity_notes=[
+                        "Strong when protocol claims arbitrary ERC20 support or the in-scope asset can have transfer fees/hooks/rebasing.",
+                        "Likely invalid if the protocol explicitly only supports known standard tokens and the contest excludes weird-token behavior.",
+                    ],
+                    evidence=[
+                        f"reads={fn.reads}",
+                        f"writes={fn.writes}",
+                        f"external_calls={fn.external_calls}",
+                    ],
+                    tags=["fee-on-transfer", "token-compatibility", "accounting", "vault"],
+                )
+            )
+
+        if fn.is_public_entrypoint and is_deposit_like and share_state and amount_state:
+            has_min_hint = _v34_contains(
+                read_write + [fn.name],
+                "minshare",
+                "minshares",
+                "minout",
+                "amountoutmin",
+                "slippage",
+            )
+            if not has_min_hint:
+                out.append(
+                    Hypothesis(
+                        id=_hid("missing-min-shares", fn.fq_name),
+                        title="Vault deposit may lack minimum shares / slippage protection",
+                        severity_guess="medium",
+                        confidence=0.52,
+                        affected_contracts=[fn.contract],
+                        related_functions=[fn.fq_name],
+                        related_state=sorted(set(read_write)),
+                        invariant="Depositors should be able to bound the minimum shares received from a deposit/mint action.",
+                        attack_preconditions=[
+                            "Share price can move between user signing and execution, or can be manipulated by donation/sandwiching.",
+                            "The deposit path does not let the user specify minimum acceptable shares.",
+                        ],
+                        exploit_sketch=[
+                            "Manipulate the share price with a donation, sandwich, or state-changing action before the victim deposit.",
+                            f"Let the victim call {fn.fq_name} without a min-shares guard.",
+                            "Victim receives fewer shares than expected while existing holders or attacker capture value.",
+                        ],
+                        validation_steps=[
+                            "Check the public function signature for minShares/minOut/deadline-style parameters.",
+                            "Simulate donation or share-price movement immediately before deposit.",
+                            "Compare victim shares against an off-chain quoted expectation.",
+                        ],
+                        contest_validity_notes=[
+                            "Usually medium/high only when a realistic MEV or donation path creates material value loss.",
+                            "May be low/invalid if UI-only slippage is expected and no realistic manipulation path exists.",
+                        ],
+                        evidence=[
+                            f"function={fn.fq_name}",
+                            f"reads={fn.reads}",
+                            f"writes={fn.writes}",
+                        ],
+                        tags=["slippage", "shares", "vault", "mev"],
+                    )
+                )
+
+        if (
+            fn.is_public_entrypoint
+            and is_reward_claim
+            and reward_state
+            and share_state
+            and ("transfer" in call_text or fn.has_asset_movement)
+        ):
+            out.append(
+                Hypothesis(
+                    id=_hid("reward-insolvency", fn.fq_name),
+                    title="Reward claims may drain the same asset reserve backing withdrawals",
+                    severity_guess="high",
+                    confidence=0.60,
+                    affected_contracts=[fn.contract],
+                    related_functions=[fn.fq_name],
+                    related_state=sorted(set(read_write)),
+                    invariant="Reward liabilities should be funded separately or capped so principal/share redemptions remain solvent.",
+                    attack_preconditions=[
+                        "Rewards are paid from the same ERC20 balance used to satisfy withdrawals or redemptions.",
+                        "Reward accrual can exceed separately funded rewards or has no explicit reserve/cap.",
+                    ],
+                    exploit_sketch=[
+                        "Build up reward entitlement through time warp, balance manipulation, or high reward rate.",
+                        f"Call {fn.fq_name} until the vault's asset balance is reduced.",
+                        "Attempt honest withdrawals and check whether share liabilities exceed remaining assets.",
+                    ],
+                    validation_steps=[
+                        "Track reward liabilities separately from principal liabilities in a Foundry invariant.",
+                        "Warp time and claim as multiple users, then assert all shares remain redeemable.",
+                        "Check whether admin-set reward rates can exceed funded reward reserves.",
+                    ],
+                    contest_validity_notes=[
+                        "Strong if permissionless users can drain principal or make later withdrawals insolvent.",
+                        "Admin-set emission rates may be invalid alone, but missing solvency caps can still matter if docs promise safety.",
+                    ],
+                    evidence=[
+                        f"reads={fn.reads}",
+                        f"writes={fn.writes}",
+                        f"external_calls={fn.external_calls}",
+                    ],
+                    tags=["rewards", "insolvency", "accounting", "vault"],
+                )
+            )
+
+        if fn.is_public_entrypoint and is_withdraw_like and share_state and amount_state:
+            out.append(
+                Hypothesis(
+                    id=_hid("withdraw-rounding-dust", fn.fq_name),
+                    title="Withdrawal/share conversion should be checked for dust or zero-rounding edge cases",
+                    severity_guess="medium",
+                    confidence=0.43,
+                    affected_contracts=[fn.contract],
+                    related_functions=[fn.fq_name],
+                    related_state=sorted(set(read_write)),
+                    invariant="Withdraw/redeem conversions should not allow asset movement with zero/too-few shares burned or permanently strand user dust.",
+                    attack_preconditions=[
+                        "Conversion math rounds in the wrong direction or permits zero-share/zero-asset edge cases.",
+                        "Repeated small operations can accumulate value leakage or lock funds.",
+                    ],
+                    exploit_sketch=[
+                        "Test tiny share amounts, tiny asset amounts, high exchange-rate states, and donated-balance states.",
+                        f"Call {fn.fq_name} repeatedly around rounding boundaries.",
+                        "Check for free withdrawal, stuck dust, or systematic value leakage.",
+                    ],
+                    validation_steps=[
+                        "Create boundary tests for 0, 1 wei, max, and high exchange-rate cases.",
+                        "Assert withdrawing assets always burns at least the correct shares.",
+                        "Assert redeeming shares always returns a fair nonzero/expected asset amount when economically meaningful.",
+                    ],
+                    contest_validity_notes=[
+                        "Escalate only with a repeatable profit/loss path. Pure dust or self-harm is often invalid.",
+                    ],
+                    evidence=[
+                        f"reads={fn.reads}",
+                        f"writes={fn.writes}",
+                        f"external_calls={fn.external_calls}",
+                    ],
+                    tags=["rounding", "dust", "shares", "vault"],
+                )
+            )
+
+    return out
+
+
+def _generate_v34(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[Hypothesis]:
+    functions = _extract_functions(analysis)
+    hypotheses = list(_ORIGINAL_GENERATE_V34(self, analysis))
+    hypotheses.extend(_v34_primer_backed_hypotheses(functions))
+    return _dedupe_hypotheses(_precision_filter(hypotheses))
+
+
+HypothesisEngine.generate = _generate_v34

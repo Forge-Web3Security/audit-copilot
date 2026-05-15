@@ -160,3 +160,42 @@ def test_precision_filter_drops_trusted_admin_accounting_noise():
     assert deposit_order.severity_guess == "medium"
     assert deposit_order.confidence <= 0.48
 
+def test_v34_primer_backed_vault_archetypes():
+    analysis = {
+        "transitions": [
+            {
+                "contract": "SimpleVault",
+                "function": "deposit",
+                "reads_storage": ["amount", "asset"],
+                "writes_storage": ["assetsBefore", "minted", "shares", "totalShares"],
+                "external_calls": ["transferFrom"],
+                "auth_requirements": [],
+                "asset_movements": ["token movement/mint/burn"],
+            },
+            {
+                "contract": "SimpleVault",
+                "function": "withdraw",
+                "reads_storage": ["asset"],
+                "writes_storage": ["amountOut", "shares", "totalShares"],
+                "external_calls": ["low-level external call", "transfer"],
+                "auth_requirements": [],
+                "asset_movements": ["token movement/mint/burn"],
+            },
+            {
+                "contract": "SimpleVault",
+                "function": "claimRewards",
+                "reads_storage": ["asset", "rewardRate", "shares"],
+                "writes_storage": ["amount", "elapsed", "lastClaim"],
+                "external_calls": ["low-level external call", "transfer"],
+                "auth_requirements": [],
+                "asset_movements": ["token movement/mint/burn"],
+            },
+        ]
+    }
+
+    ids = {h.id for h in generate_hypotheses(analysis)}
+
+    assert "fot-accounting-mismatch:simplevault-deposit" in ids
+    assert "missing-min-shares:simplevault-deposit" in ids
+    assert "reward-insolvency:simplevault-claimrewards" in ids
+    assert "withdraw-rounding-dust:simplevault-withdraw" in ids
