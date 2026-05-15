@@ -28,10 +28,11 @@ def analyze(
     out: Path = typer.Option(Path("reports/analysis"), help="Output directory"),
     slither: Path | None = typer.Option(None, help="Optional Slither JSON output"),
     aderyn: Path | None = typer.Option(None, help="Optional Aderyn JSON output"),
+    context: Path | None = typer.Option(None, help="Optional project-local audit_context.json"),
 ):
     """Analyze a Solidity project and produce model, invariants, findings, and report."""
     result = analyze_project(root, platform, str(slither) if slither else None, str(aderyn) if aderyn else None)
-    write_outputs(result, out)
+    write_outputs(result, out, context)
 
     table = Table(title="Audit Copilot Summary")
     table.add_column("Metric")
@@ -46,6 +47,8 @@ def analyze(
     console.print(f"[green]Wrote:[/green] {out / 'report.md'}")
     console.print(f"[green]Wrote:[/green] {out / 'hypotheses.json'}")
     console.print(f"[green]Wrote:[/green] {out / 'hypotheses.md'}")
+    if context:
+        console.print(f"[green]Used context:[/green] {context}")
 
 
 @app.command("foundry-stubs")
