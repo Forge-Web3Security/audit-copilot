@@ -250,3 +250,50 @@ def test_v36_detects_oracle_spot_price_manipulation():
 
     assert "oracle-spot-price-manipulation:badexchange-getpriceofusdcinweth" in ids
     assert "oracle-spot-price-manipulation:oraclemanipulation-buynft" in ids
+
+
+def test_v40_filters_obvious_fixture_helper_noise():
+    analysis = {
+        "transitions": [
+            {
+                "contract": "MockERC20",
+                "function": "mint",
+                "visibility": "external",
+                "reads_storage": [],
+                "writes_storage": ["totalSupply", "balanceOf"],
+                "external_calls": [],
+                "auth_requirements": [],
+                "asset_movements": ["token movement/mint/burn"],
+                "notes": [],
+            },
+            {
+                "contract": "VulnerableVault",
+                "function": "deposit",
+                "visibility": "external",
+                "reads_storage": ["assetToken"],
+                "writes_storage": [],
+                "external_calls": ["transferFrom"],
+                "auth_requirements": [],
+                "asset_movements": ["token movement/mint/burn"],
+                "notes": ["calls convertToShares"],
+            },
+            {
+                "contract": "VulnerableVault",
+                "function": "convertToShares",
+                "visibility": "public",
+                "reads_storage": ["totalSupply"],
+                "writes_storage": [],
+                "external_calls": [],
+                "auth_requirements": [],
+                "asset_movements": [],
+                "notes": ["calls convertToShares"],
+            },
+        ]
+    }
+
+    ids = {h.id for h in generate_hypotheses(analysis)}
+
+    assert "missing-min-shares:vulnerablevault-deposit" in ids
+    assert not any(item.startswith("asset-move-no-auth:mockerc20") for item in ids)
+    assert not any(item.startswith("share-manipulation:mockerc20") for item in ids)
+    assert not any(item.startswith("accounting-no-assets:vulnerablevault-converttoshares") for item in ids)

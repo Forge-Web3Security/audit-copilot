@@ -1518,3 +1518,87 @@ def _generate_v39(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[H
 
 HypothesisEngine.generate = _generate_v39
 
+# --- v4.0 precision: benchmark noise health filters ---
+
+_ORIGINAL_GENERATE_V40 = HypothesisEngine.generate
+
+
+def _v40_join_hypothesis_text(h: Hypothesis) -> str:
+    return " ".join([
+        h.id,
+        *h.affected_contracts,
+        *h.related_functions,
+        *h.related_state,
+        *h.evidence,
+        *h.tags,
+    ]).lower()
+
+
+def _v40_is_mock_token_noise(h: Hypothesis) -> bool:
+    joined = _v40_join_hypothesis_text(h)
+
+    if "mockerc20" not in joined:
+        return False
+
+    return h.id.startswith((
+        "asset-move-no-auth:",
+        "share-manipulation:",
+    ))
+
+
+def _v40_is_signature_reward_snapshot_noise(h: Hypothesis) -> bool:
+    joined = _v40_join_hypothesis_text(h)
+
+    return (
+        h.id.startswith("reward-snapshot:")
+        and (
+            "signature" in joined
+            or "ecrecover" in joined
+            or "signaturereplay" in joined
+        )
+    )
+
+
+def _v40_is_accounting_helper_noise(h: Hypothesis) -> bool:
+    if not h.id.startswith("accounting-no-assets:"):
+        return False
+
+    joined = _v40_join_hypothesis_text(h)
+
+    helper_terms = (
+        "converttoassets",
+        "converttoshares",
+        "previewdeposit",
+        "previewredeem",
+        "totalassets",
+        "getoutputamountbasedoninput",
+        "getpriceof",
+    )
+
+    return any(term in joined for term in helper_terms)
+
+
+def _v40_noise_filter(hypotheses: list[Hypothesis]) -> list[Hypothesis]:
+    filtered: list[Hypothesis] = []
+
+    for h in hypotheses:
+        if _v40_is_mock_token_noise(h):
+            continue
+
+        if _v40_is_signature_reward_snapshot_noise(h):
+            continue
+
+        if _v40_is_accounting_helper_noise(h):
+            continue
+
+        filtered.append(h)
+
+    return filtered
+
+
+def _generate_v40(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[Hypothesis]:
+    hypotheses = list(_ORIGINAL_GENERATE_V40(self, analysis))
+    return _dedupe_hypotheses(_precision_filter(_v40_noise_filter(hypotheses)))
+
+
+HypothesisEngine.generate = _generate_v40
