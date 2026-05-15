@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -15,6 +14,7 @@ class BenchmarkFixture(BaseModel):
     name: str
     path: str
     expected_hypotheses: list[str] = Field(default_factory=list)
+    unexpected_hypotheses: list[str] = Field(default_factory=list)
     platform: Platform = Platform.sherlock
 
 
@@ -23,8 +23,10 @@ class BenchmarkResult(BaseModel):
     path: str
     passed: bool
     expected_hypotheses: list[str]
+    unexpected_hypotheses: list[str]
     matched_hypotheses: list[str]
     missing_hypotheses: list[str]
+    forbidden_hypotheses: list[str]
     observed_hypotheses: list[str]
 
 
@@ -83,6 +85,7 @@ def run_fixture(fixture: BenchmarkFixture, fixture_path: str | Path) -> Benchmar
 
     matched: list[str] = []
     missing: list[str] = []
+    forbidden: list[str] = []
 
     for expected in fixture.expected_hypotheses:
         if _matches_expected(expected, observed):
@@ -90,13 +93,19 @@ def run_fixture(fixture: BenchmarkFixture, fixture_path: str | Path) -> Benchmar
         else:
             missing.append(expected)
 
+    for unexpected in fixture.unexpected_hypotheses:
+        if _matches_expected(unexpected, observed):
+            forbidden.append(unexpected)
+
     return BenchmarkResult(
         name=fixture.name,
         path=str(fixture_path),
-        passed=not missing,
+        passed=not missing and not forbidden,
         expected_hypotheses=fixture.expected_hypotheses,
+        unexpected_hypotheses=fixture.unexpected_hypotheses,
         matched_hypotheses=matched,
         missing_hypotheses=missing,
+        forbidden_hypotheses=forbidden,
         observed_hypotheses=observed,
     )
 
@@ -109,15 +118,16 @@ def benchmark_to_markdown(summary: BenchmarkSummary) -> str:
         f"- **Failed:** {summary.failed}",
         f"- **Total:** {summary.total}",
         "",
-        "| Fixture | Status | Matched | Missing |",
-        "|---|---:|---|---|",
+        "| Fixture | Status | Matched | Missing | Forbidden |",
+        "|---|---:|---|---|---|",
     ]
 
     for result in summary.fixtures:
         status = "PASS" if result.passed else "FAIL"
         matched = ", ".join(result.matched_hypotheses) if result.matched_hypotheses else "-"
         missing = ", ".join(result.missing_hypotheses) if result.missing_hypotheses else "-"
-        lines.append(f"| {result.name} | {status} | {matched} | {missing} |")
+        forbidden = ", ".join(result.forbidden_hypotheses) if result.forbidden_hypotheses else "-"
+        lines.append(f"| {result.name} | {status} | {matched} | {missing} | {forbidden} |")
 
     lines.append("")
     lines.append("## Observed hypotheses")
@@ -125,6 +135,10 @@ def benchmark_to_markdown(summary: BenchmarkSummary) -> str:
 
     for result in summary.fixtures:
         lines.append(f"### {result.name}")
+        if result.expected_hypotheses:
+            lines.append(f"- Required: {', '.join(result.expected_hypotheses)}")
+        if result.unexpected_hypotheses:
+            lines.append(f"- Forbidden: {', '.join(result.unexpected_hypotheses)}")
         if result.observed_hypotheses:
             lines.extend([f"- `{item}`" for item in result.observed_hypotheses])
         else:
@@ -135,12 +149,6 @@ def benchmark_to_markdown(summary: BenchmarkSummary) -> str:
 
 
 def _matches_expected(expected: str, observed: list[str]) -> bool:
-    """Match exact IDs or prefixes.
-
-    Examples:
-    - external-call-order matches external-call-order:simplevault-withdraw
-    - reward-insolvency:simplevault-claimrewards matches exactly
-    """
     expected_lower = expected.lower()
     return any(
         item.lower() == expected_lower or item.lower().startswith(expected_lower + ":")
