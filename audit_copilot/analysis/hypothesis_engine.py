@@ -1273,3 +1273,38 @@ def _generate_v37b(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[
 
 
 HypothesisEngine.generate = _generate_v37b
+
+# --- v3.8 precision: CEI-safe external calls are not external-call-order findings ---
+
+_ORIGINAL_GENERATE_V38 = HypothesisEngine.generate
+
+
+def _v38_cei_safe_external_call_functions(functions: list[FunctionSignal]) -> set[str]:
+    safe: set[str] = set()
+
+    for fn in functions:
+        notes = " ".join(str(x).lower() for x in fn.raw.get("notes", []))
+        if (
+            "state write appears before external interaction" in notes
+            or "cei effects-before-interaction ordering" in notes
+        ):
+            safe.add(fn.fq_name)
+
+    return safe
+
+
+def _generate_v38(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[Hypothesis]:
+    functions = _extract_functions(analysis)
+    cei_safe = _v38_cei_safe_external_call_functions(functions)
+    hypotheses = list(_ORIGINAL_GENERATE_V38(self, analysis))
+
+    filtered: list[Hypothesis] = []
+    for h in hypotheses:
+        if h.id.startswith("external-call-order:") and any(fn in cei_safe for fn in h.related_functions):
+            continue
+        filtered.append(h)
+
+    return _dedupe_hypotheses(_precision_filter(filtered))
+
+
+HypothesisEngine.generate = _generate_v38

@@ -40,6 +40,7 @@ def extract_transitions(contracts: list[ContractInfo]) -> list[StateTransition]:
             timing = [h for h in TIME_HINTS if h in body.lower() or h in body]
             notes = []
             notes.extend(_body_notes(body))
+            notes.extend(_cei_order_notes(body, state_vars))
             if ext and writes:
                 notes.append("external interaction and storage write appear in same transition; check CEI and reentrancy assumptions")
             if assets and not auth and fn.visibility in {"public", "external"}:
@@ -111,5 +112,67 @@ def _function_window_notes(contract_source: str, function_name: str) -> list[str
 
     if "totalassets()" in window or "balanceof(address(this))" in window:
         notes.append("uses live asset balance")
+
+    return notes
+
+
+def _cei_order_notes(body: str, state_vars: set[str]) -> list[str]:
+    notes: list[str] = []
+
+    def is_local_declaration(match: re.Match[str]) -> bool:
+        line_start = body.rfind("\n", 0, match.start()) + 1
+        prefix = body[line_start:match.start()].strip()
+
+        # Examples to ignore:
+        # uint256 balance =
+        # address receiver =
+        # bool success =
+        # (bool success,) =
+        # Anything with an explicit type/declaration immediately before the target
+        # is not a storage effect.
+        declaration_markers = (
+            "uint",
+            "int",
+            "address",
+            "bool",
+            "bytes",
+            "string",
+            "mapping",
+            "contract",
+            "IERC",
+            "ERC",
+            "(",
+        )
+
+        return prefix.startswith(declaration_markers)
+
+    write_positions: list[int] = []
+    for match in ASSIGN_RE.finditer(body):
+        raw_target = match.group(1)
+        var_name = raw_target.split("[")[0]
+
+        if var_name not in state_vars:
+            continue
+
+        if is_local_declaration(match):
+            continue
+
+        write_positions.append(match.start())
+
+    external_positions = [m.start() for m in CALL_RE.finditer(body)]
+    external_positions.extend(m.start() for m in TOKEN_CALL_RE.finditer(body))
+
+    if not write_positions or not external_positions:
+        return notes
+
+    first_write = min(write_positions)
+    first_external = min(external_positions)
+
+    if first_write < first_external:
+        notes.append("state write appears before external interaction")
+        notes.append("cei effects-before-interaction ordering")
+    else:
+        notes.append("external interaction appears before state write")
+        notes.append("cei interaction-before-effects ordering")
 
     return notes
