@@ -7,6 +7,7 @@ from rich.console import Console
 from rich.table import Table
 from .engine import analyze_project, write_outputs
 from .foundry import write_foundry_stubs
+from .foundry_plan import write_foundry_plan_from_analysis
 from .models import AnalysisResult, Platform
 from .invariant_breaker import (
     break_invariant_plan,
@@ -67,6 +68,25 @@ def foundry_stubs(
     result = AnalysisResult.model_validate_json(analysis_json.read_text())
     write_foundry_stubs(result, out)
     console.print(f"[green]Wrote Foundry stubs to:[/green] {out}")
+
+
+
+
+@app.command("foundry-plan")
+def foundry_plan_command(
+    analysis_json: Path = typer.Argument(..., exists=True, file_okay=True, dir_okay=False),
+    invariant: str = typer.Argument(..., help="Invariant to turn into a Foundry test skeleton"),
+    out: Path = typer.Option(Path("reports/foundry/GeneratedInvariantPlan.t.sol"), help="Output Solidity test path"),
+    contract_name: str = typer.Option("GeneratedInvariantPlanTest", help="Generated Solidity test contract name"),
+):
+    """Generate a Foundry test skeleton from an invariant break plan."""
+    written = write_foundry_plan_from_analysis(
+        analysis_json=analysis_json,
+        invariant=invariant,
+        out=out,
+        contract_name=contract_name,
+    )
+    console.print(f"[green]Wrote Foundry plan:[/green] {written}")
 
 
 
