@@ -199,3 +199,23 @@ def test_v34_primer_backed_vault_archetypes():
     assert "missing-min-shares:simplevault-deposit" in ids
     assert "reward-insolvency:simplevault-claimrewards" in ids
     assert "withdraw-rounding-dust:simplevault-withdraw" in ids
+
+def test_v35_detects_missing_access_control_owner_setter():
+    analysis = {
+        "transitions": [
+            {
+                "contract": "MissingAccessControls",
+                "function": "setOwner",
+                "visibility": "external",
+                "reads_storage": [],
+                "writes_storage": ["owner"],
+                "external_calls": [],
+                "auth_requirements": [],
+                "asset_movements": [],
+            }
+        ]
+    }
+
+    ids = {h.id for h in generate_hypotheses(analysis)}
+
+    assert "missing-access-control:missingaccesscontrols-setowner" in ids

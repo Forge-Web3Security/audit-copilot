@@ -922,3 +922,134 @@ def _generate_v34(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[H
 
 
 HypothesisEngine.generate = _generate_v34
+
+# --- v3.5 access-control takeover archetype ---
+# --- v3.5 access-control takeover archetype ---
+
+_ORIGINAL_GENERATE_V35 = HypothesisEngine.generate
+
+
+def _v35_access_control_hypotheses(functions: list[FunctionSignal]) -> list[Hypothesis]:
+    out: list[Hypothesis] = []
+
+    sensitive_state_terms = (
+        "owner",
+        "pendingowner",
+        "admin",
+        "governance",
+        "governor",
+        "guardian",
+        "operator",
+        "keeper",
+        "role",
+        "authority",
+        "implementation",
+        "proxy",
+        "upgrade",
+        "pauser",
+        "treasury",
+        "oracle",
+    )
+
+    sensitive_function_terms = (
+        "setowner",
+        "transferownership",
+        "acceptownership",
+        "setadmin",
+        "grantrole",
+        "revokerole",
+        "setgovernance",
+        "setgovernor",
+        "setoperator",
+        "setkeeper",
+        "setguardian",
+        "upgrade",
+        "setimplementation",
+        "setoracle",
+        "settreasury",
+        "setfee",
+        "setrewardrate",
+        "pause",
+        "unpause",
+    )
+
+    for fn in functions:
+        fn_name = fn.name.lower()
+        state_text = " ".join([*fn.reads, *fn.writes]).lower()
+        auth_requirements = [str(x) for x in fn.raw.get("auth_requirements", [])]
+        evidence_text = " ".join([*auth_requirements, *fn.modifiers]).lower()
+
+        writes_sensitive_state = any(term in state_text for term in sensitive_state_terms)
+        sensitive_name = any(term in fn_name for term in sensitive_function_terms)
+        has_auth = bool(auth_requirements or fn.modifiers) or any(
+            term in evidence_text
+            for term in ("onlyowner", "onlyrole", "requiresrole", "admin", "governance", "owner")
+        )
+
+        if not fn.is_public_entrypoint:
+            continue
+
+        if has_auth:
+            continue
+
+        entitlement_name = any(
+            term in fn_name
+            for term in ("claim", "withdraw", "redeem", "deposit", "mint", "burn", "stake", "unstake")
+        )
+
+        if entitlement_name and not sensitive_name and not writes_sensitive_state:
+            continue
+
+        if not (writes_sensitive_state or sensitive_name):
+            continue
+
+        out.append(
+            Hypothesis(
+                id=_hid("missing-access-control", fn.fq_name),
+                title="Sensitive control-plane function appears externally callable without authorization",
+                severity_guess="high",
+                confidence=0.72,
+                affected_contracts=[fn.contract],
+                related_functions=[fn.fq_name],
+                related_state=sorted(set([*fn.reads, *fn.writes])),
+                invariant="Only authorized roles should be able to change ownership, roles, governance, upgrade, oracle, fee, pause, or other privileged configuration state.",
+                attack_preconditions=[
+                    "The function is externally/publicly reachable.",
+                    "The function writes privileged state or has a sensitive setter/role-management name.",
+                    "There is no modifier or explicit authorization requirement detected.",
+                ],
+                exploit_sketch=[
+                    f"Call {fn.fq_name} from an arbitrary non-admin address.",
+                    "Set owner/admin/role/configuration to attacker-controlled values or unsafe parameters.",
+                    "Use the gained control path to drain funds, block users, alter pricing, upgrade logic, or bypass intended governance.",
+                ],
+                validation_steps=[
+                    "Confirm the Solidity body lacks msg.sender/role validation, modifiers, or internal-only routing.",
+                    "Write a Foundry test where a random address calls the function successfully.",
+                    "Check what privileged follow-up actions become possible after the unauthorized state change.",
+                ],
+                contest_validity_notes=[
+                    "Strong when a non-admin can take ownership, grant roles, upgrade, pause, change oracle/fees, or alter critical parameters.",
+                    "Do not report if the function is intentionally permissionless and cannot affect user funds, pricing, liveness, or privileged control.",
+                ],
+                evidence=[
+                    f"reads={fn.reads}",
+                    f"writes={fn.writes}",
+                    f"modifiers={fn.modifiers}",
+                    f"auth_requirements={auth_requirements}",
+                ],
+                tags=["access-control", "privilege", "ownership", "control-plane"],
+            )
+        )
+
+    return out
+
+
+def _generate_v35(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[Hypothesis]:
+    functions = _extract_functions(analysis)
+    hypotheses = list(_ORIGINAL_GENERATE_V35(self, analysis))
+    hypotheses.extend(_v35_access_control_hypotheses(functions))
+    return _dedupe_hypotheses(_precision_filter(hypotheses))
+
+
+HypothesisEngine.generate = _generate_v35
