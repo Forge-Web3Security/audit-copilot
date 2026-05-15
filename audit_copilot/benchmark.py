@@ -111,26 +111,59 @@ def run_fixture(fixture: BenchmarkFixture, fixture_path: str | Path) -> Benchmar
 
 
 def benchmark_to_markdown(summary: BenchmarkSummary) -> str:
+    positive_count = sum(1 for fixture in summary.fixtures if fixture.expected_hypotheses)
+    negative_count = sum(1 for fixture in summary.fixtures if fixture.unexpected_hypotheses and not fixture.expected_hypotheses)
+    mixed_count = sum(1 for fixture in summary.fixtures if fixture.expected_hypotheses and fixture.unexpected_hypotheses)
+
     lines = [
         "# Audit Copilot Benchmark Results",
+        "",
+        "## Health summary",
         "",
         f"- **Passed:** {summary.passed}",
         f"- **Failed:** {summary.failed}",
         f"- **Total:** {summary.total}",
+        f"- **Positive fixtures:** {positive_count}",
+        f"- **Negative fixtures:** {negative_count}",
+        f"- **Mixed fixtures:** {mixed_count}",
         "",
-        "| Fixture | Status | Matched | Missing | Forbidden |",
-        "|---|---:|---|---|---|",
+        "## Required / forbidden checks",
+        "",
+        "| Fixture | Type | Status | Matched | Missing | Forbidden hit |",
+        "|---|---|---:|---|---|---|",
     ]
 
     for result in summary.fixtures:
         status = "PASS" if result.passed else "FAIL"
+        fixture_type = _fixture_type(result)
         matched = ", ".join(result.matched_hypotheses) if result.matched_hypotheses else "-"
         missing = ", ".join(result.missing_hypotheses) if result.missing_hypotheses else "-"
         forbidden = ", ".join(result.forbidden_hypotheses) if result.forbidden_hypotheses else "-"
-        lines.append(f"| {result.name} | {status} | {matched} | {missing} | {forbidden} |")
+        lines.append(f"| {result.name} | {fixture_type} | {status} | {matched} | {missing} | {forbidden} |")
 
     lines.append("")
-    lines.append("## Observed hypotheses")
+    lines.append("## Noise watch")
+    lines.append("")
+    lines.append("Non-required hypotheses are not automatically wrong, but they are useful for tracking detector noise as the benchmark grows.")
+    lines.append("")
+    lines.append("| Fixture | Non-required observed hypotheses |")
+    lines.append("|---|---|")
+
+    for result in summary.fixtures:
+        required_prefixes = set(result.expected_hypotheses)
+        forbidden_prefixes = set(result.unexpected_hypotheses)
+        non_required = [
+            item for item in result.observed_hypotheses
+            if not _matches_any_prefix(item, required_prefixes)
+            and not _matches_any_prefix(item, forbidden_prefixes)
+        ]
+        display = ", ".join(f"`{item}`" for item in non_required) if non_required else "-"
+        lines.append(f"| {result.name} | {display} |")
+
+    lines.append("")
+    lines.append("## Full observed hypotheses")
+    lines.append("")
+    lines.append("Use this section for detector debugging. The pass/fail gate is the required/forbidden table above.")
     lines.append("")
 
     for result in summary.fixtures:
@@ -146,6 +179,24 @@ def benchmark_to_markdown(summary: BenchmarkSummary) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+def _fixture_type(result: BenchmarkResult) -> str:
+    if result.expected_hypotheses and result.unexpected_hypotheses:
+        return "mixed"
+    if result.expected_hypotheses:
+        return "positive"
+    if result.unexpected_hypotheses:
+        return "negative"
+    return "informational"
+
+
+def _matches_any_prefix(item: str, prefixes: set[str]) -> bool:
+    item_lower = item.lower()
+    return any(
+        item_lower == prefix.lower() or item_lower.startswith(prefix.lower() + ":")
+        for prefix in prefixes
+    )
 
 
 def _matches_expected(expected: str, observed: list[str]) -> bool:
