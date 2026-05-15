@@ -9,6 +9,7 @@ from .engine import analyze_project, write_outputs
 from .foundry import write_foundry_stubs
 from .foundry_plan import write_foundry_plan_from_analysis
 from .models import AnalysisResult, Platform
+from .benchmark import benchmark_to_markdown, run_benchmark_manifest
 from .invariant_breaker import (
     break_invariant_plan,
     break_plan_to_markdown,
@@ -69,6 +70,28 @@ def foundry_stubs(
     write_foundry_stubs(result, out)
     console.print(f"[green]Wrote Foundry stubs to:[/green] {out}")
 
+
+
+
+
+@app.command("benchmark-fixtures")
+def benchmark_fixtures_command(
+    manifest: Path = typer.Argument(..., exists=True, file_okay=True, dir_okay=False),
+    out: Path | None = typer.Option(None, help="Optional markdown output path"),
+):
+    """Run benchmark fixtures and compare observed hypotheses to expected IDs/prefixes."""
+    summary = run_benchmark_manifest(manifest)
+    markdown = benchmark_to_markdown(summary)
+
+    if out:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(markdown)
+        console.print(f"[green]Wrote benchmark report:[/green] {out}")
+    else:
+        console.print(markdown)
+
+    if summary.failed:
+        raise typer.Exit(code=1)
 
 
 
