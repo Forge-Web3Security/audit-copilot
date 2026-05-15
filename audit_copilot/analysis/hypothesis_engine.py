@@ -783,14 +783,30 @@ def _v34_primer_backed_hypotheses(functions: list[FunctionSignal]) -> list[Hypot
                 )
             )
 
-        if fn.is_public_entrypoint and is_deposit_like and share_state and amount_state:
+        token_mint_helper = (
+            fn.name.lower() in ("mint", "_mint")
+            and not any(
+                term in fn.contract.lower()
+                for term in ("vault", "share", "strategy", "4626")
+            )
+        )
+
+        if (
+            fn.is_public_entrypoint
+            and is_deposit_like
+            and share_state
+            and amount_state
+            and not token_mint_helper
+        ):
             has_min_hint = _v34_contains(
-                read_write + [fn.name],
+                read_write + [fn.name, *[str(x) for x in fn.raw.get("notes", [])]],
                 "minshare",
                 "minshares",
                 "minout",
                 "amountoutmin",
                 "slippage",
+                "nonzero shares guard",
+                "zero_shares",
             )
             if not has_min_hint:
                 out.append(
@@ -1162,3 +1178,98 @@ def _generate_v36(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[H
 
 
 HypothesisEngine.generate = _generate_v36
+
+# --- v3.7 precise vault deposit min-shares detector ---
+
+_ORIGINAL_GENERATE_V37B = HypothesisEngine.generate
+
+
+def _v37b_has_missing_min_shares(hypotheses: list[Hypothesis], fq_name: str) -> bool:
+    return any(h.id == _hid("missing-min-shares", fq_name) for h in hypotheses)
+
+
+def _v37b_vault_deposit_missing_min_shares(functions: list[FunctionSignal]) -> list[Hypothesis]:
+    out: list[Hypothesis] = []
+
+    for fn in functions:
+        fn_name = fn.name.lower()
+        contract_name = fn.contract.lower()
+        notes = [str(x).lower() for x in fn.raw.get("notes", [])]
+        joined_notes = " ".join(notes)
+
+        is_vault_context = any(term in contract_name for term in ("vault", "strategy", "4626"))
+        is_deposit_path = fn_name in ("deposit", "mint") or "deposit" in fn_name
+        calls_share_conversion = "calls converttoshares" in joined_notes
+        has_protection = any(
+            term in joined_notes
+            for term in (
+                "has nonzero shares guard",
+                "has min shares/slippage parameter",
+                "zero_shares",
+                "minshares",
+                "minout",
+            )
+        )
+
+        if not (fn.is_public_entrypoint and is_vault_context and is_deposit_path and calls_share_conversion):
+            continue
+
+        if has_protection:
+            continue
+
+        out.append(
+            Hypothesis(
+                id=_hid("missing-min-shares", fn.fq_name),
+                title="Vault deposit may lack minimum shares / zero-share protection",
+                severity_guess="medium",
+                confidence=0.63,
+                affected_contracts=[fn.contract],
+                related_functions=[fn.fq_name],
+                related_state=sorted(set([*fn.reads, *fn.writes])),
+                invariant="Vault deposits should prevent zero-share mints and let users bound minimum acceptable shares.",
+                attack_preconditions=[
+                    "The function is a public/external vault deposit path.",
+                    "The function converts assets to shares.",
+                    "No minShares/minOut or nonzero-share guard was detected.",
+                ],
+                exploit_sketch=[
+                    "Attacker manipulates share price via first deposit plus donation or sandwiching.",
+                    f"Victim calls {fn.fq_name} without a minimum share bound.",
+                    "Victim receives zero or materially fewer shares than expected.",
+                ],
+                validation_steps=[
+                    "Confirm the deposit path computes shares before minting.",
+                    "Check whether shares == 0 is allowed.",
+                    "Simulate first-depositor donation inflation before a victim deposit.",
+                ],
+                contest_validity_notes=[
+                    "Strong when the path can cause realistic deposit value loss.",
+                    "Do not report if the function has a reliable nonzero-share/minShares guard or equivalent slippage control.",
+                ],
+                evidence=[
+                    f"function={fn.fq_name}",
+                    f"notes={fn.raw.get('notes', [])}",
+                    f"reads={fn.reads}",
+                    f"writes={fn.writes}",
+                ],
+                tags=["slippage", "shares", "vault", "zero-shares", "first-depositor-inflation"],
+            )
+        )
+
+    return out
+
+
+def _generate_v37b(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[Hypothesis]:
+    functions = _extract_functions(analysis)
+    hypotheses = list(_ORIGINAL_GENERATE_V37B(self, analysis))
+    existing = {h.id for h in hypotheses}
+
+    for h in _v37b_vault_deposit_missing_min_shares(functions):
+        if h.id not in existing:
+            hypotheses.append(h)
+            existing.add(h.id)
+
+    return _dedupe_hypotheses(_precision_filter(hypotheses))
+
+
+HypothesisEngine.generate = _generate_v37b

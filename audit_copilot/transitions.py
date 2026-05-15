@@ -39,6 +39,7 @@ def extract_transitions(contracts: list[ContractInfo]) -> list[StateTransition]:
                 assets.append("token movement/mint/burn")
             timing = [h for h in TIME_HINTS if h in body.lower() or h in body]
             notes = []
+            notes.extend(_body_notes(body))
             if ext and writes:
                 notes.append("external interaction and storage write appear in same transition; check CEI and reentrancy assumptions")
             if assets and not auth and fn.visibility in {"public", "external"}:
@@ -56,3 +57,59 @@ def extract_transitions(contracts: list[ContractInfo]) -> list[StateTransition]:
                 notes=notes,
             ))
     return transitions
+
+
+def _body_notes(source: str) -> list[str]:
+    lowered = source.lower()
+    notes: list[str] = []
+
+    if "converttoshares" in lowered:
+        notes.append("calls convertToShares")
+
+    if "previewdeposit" in lowered:
+        notes.append("uses previewDeposit")
+
+    if "shares > 0" in lowered or "shares>0" in lowered or "zero_shares" in lowered:
+        notes.append("has nonzero shares guard")
+
+    if "minshares" in lowered or "min_shares" in lowered or "minout" in lowered or "amountoutmin" in lowered:
+        notes.append("has min shares/slippage parameter")
+
+    if "totalassets()" in lowered or "balanceof(address(this))" in lowered:
+        notes.append("uses live asset balance")
+
+    return notes
+
+
+def _function_window_notes(contract_source: str, function_name: str) -> list[str]:
+    lowered_source = contract_source.lower()
+    lowered_name = function_name.lower()
+    notes: list[str] = []
+
+    # Find a local window around the function declaration/name. This is intentionally
+    # heuristic but much better than relying on parser hints that may omit body details.
+    idx = lowered_source.find("function " + lowered_name)
+    if idx == -1:
+        idx = lowered_source.find(lowered_name)
+
+    if idx == -1:
+        window = lowered_source
+    else:
+        window = lowered_source[idx: idx + 2500]
+
+    if "converttoshares" in window:
+        notes.append("calls convertToShares")
+
+    if "previewdeposit" in window:
+        notes.append("uses previewDeposit")
+
+    if "shares > 0" in window or "shares>0" in window or "zero_shares" in window:
+        notes.append("has nonzero shares guard")
+
+    if "minshares" in window or "min_shares" in window or "minout" in window or "amountoutmin" in window:
+        notes.append("has min shares/slippage parameter")
+
+    if "totalassets()" in window or "balanceof(address(this))" in window:
+        notes.append("uses live asset balance")
+
+    return notes
