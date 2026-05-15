@@ -8,6 +8,13 @@ from rich.table import Table
 from .engine import analyze_project, write_outputs
 from .foundry import write_foundry_stubs
 from .models import AnalysisResult, Platform
+from .invariant_breaker import (
+    break_invariant_plan,
+    break_plan_to_markdown,
+    invariants_to_markdown,
+    load_analysis as load_analysis_json,
+    propose_invariants_from_analysis,
+)
 from .session import (
     add_invariant as add_context_invariant,
     add_note as add_context_note,
@@ -60,6 +67,45 @@ def foundry_stubs(
     result = AnalysisResult.model_validate_json(analysis_json.read_text())
     write_foundry_stubs(result, out)
     console.print(f"[green]Wrote Foundry stubs to:[/green] {out}")
+
+
+
+@app.command("propose-invariants")
+def propose_invariants_command(
+    analysis_json: Path = typer.Argument(..., exists=True, file_okay=True, dir_okay=False),
+    out: Path | None = typer.Option(None, help="Optional markdown output path"),
+):
+    """Propose important invariants from analysis.json."""
+    analysis = load_analysis_json(analysis_json)
+    invariants = propose_invariants_from_analysis(analysis)
+    markdown = invariants_to_markdown(invariants)
+
+    if out:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(markdown)
+        console.print(f"[green]Wrote:[/green] {out}")
+    else:
+        console.print(markdown)
+
+
+@app.command("break-invariant")
+def break_invariant_command(
+    analysis_json: Path = typer.Argument(..., exists=True, file_okay=True, dir_okay=False),
+    invariant: str = typer.Argument(..., help="Invariant to attempt to break"),
+    out: Path | None = typer.Option(None, help="Optional markdown output path"),
+):
+    """Generate attack plans for breaking a specific invariant."""
+    analysis = load_analysis_json(analysis_json)
+    plan = break_invariant_plan(analysis, invariant)
+    markdown = break_plan_to_markdown(plan)
+
+    if out:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(markdown)
+        console.print(f"[green]Wrote:[/green] {out}")
+    else:
+        console.print(markdown)
+
 
 
 @app.command("mark-invalid")
