@@ -219,3 +219,34 @@ def test_v35_detects_missing_access_control_owner_setter():
     ids = {h.id for h in generate_hypotheses(analysis)}
 
     assert "missing-access-control:missingaccesscontrols-setowner" in ids
+
+def test_v36_detects_oracle_spot_price_manipulation():
+    analysis = {
+        "transitions": [
+            {
+                "contract": "BadExchange",
+                "function": "getPriceOfUSDCInWeth",
+                "visibility": "external",
+                "reads_storage": ["i_poolToken", "i_wethToken"],
+                "writes_storage": [],
+                "external_calls": ["balanceOf", "getOutputAmountBasedOnInput"],
+                "auth_requirements": [],
+                "asset_movements": [],
+            },
+            {
+                "contract": "OracleManipulation",
+                "function": "buyNft",
+                "visibility": "external",
+                "reads_storage": ["exchange", "USD_PRICE_OF_NFT", "tokenCounter"],
+                "writes_storage": ["tokenCounter"],
+                "external_calls": ["getEthPriceOfNft"],
+                "auth_requirements": [],
+                "asset_movements": [],
+            },
+        ]
+    }
+
+    ids = {h.id for h in generate_hypotheses(analysis)}
+
+    assert "oracle-spot-price-manipulation:badexchange-getpriceofusdcinweth" in ids
+    assert "oracle-spot-price-manipulation:oraclemanipulation-buynft" in ids

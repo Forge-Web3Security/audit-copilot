@@ -1053,3 +1053,112 @@ def _generate_v35(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[H
 
 
 HypothesisEngine.generate = _generate_v35
+
+# --- v3.6 oracle / spot-price manipulation archetype ---
+# --- v3.6 oracle / spot-price manipulation archetype ---
+
+_ORIGINAL_GENERATE_V36 = HypothesisEngine.generate
+
+
+def _v36_oracle_price_hypotheses(functions: list[FunctionSignal]) -> list[Hypothesis]:
+    out: list[Hypothesis] = []
+
+    price_terms = (
+        "price",
+        "oracle",
+        "quote",
+        "getethprice",
+        "getprice",
+        "spot",
+        "reserve",
+        "pool",
+        "weth",
+        "usdc",
+        "usd",
+    )
+
+    reserve_terms = (
+        "balanceof",
+        "reserve",
+        "pool",
+        "swap",
+        "getoutputamount",
+        "getinputamount",
+        "liquidity",
+        "amm",
+        "exchange",
+    )
+
+    for fn in functions:
+        fn_name = fn.name.lower()
+        contract_name = fn.contract.lower()
+        state_text = " ".join([*fn.reads, *fn.writes]).lower()
+        call_text = " ".join(fn.external_calls).lower()
+        raw_text = str(fn.raw).lower()
+        combined = " ".join([fn_name, contract_name, state_text, call_text, raw_text])
+
+        price_named = any(term in combined for term in price_terms)
+        reserve_based = any(term in combined for term in reserve_terms)
+
+        # A view/pure price function using balances/reserves/pool math is a likely spot-price oracle source.
+        is_price_source = price_named and reserve_based
+
+        # A payable buy/mint path that calls/depends on a price function is a likely victim path.
+        is_price_consumer = (
+            any(term in fn_name for term in ("buy", "mint", "purchase", "swap"))
+            and any(term in combined for term in ("price", "oracle", "quote", "exchange"))
+        )
+
+        if not (is_price_source or is_price_consumer):
+            continue
+
+        out.append(
+            Hypothesis(
+                id=_hid("oracle-spot-price-manipulation", fn.fq_name),
+                title="Protocol pricing may rely on manipulable spot reserves or exchange balance state",
+                severity_guess="high",
+                confidence=0.67 if is_price_source else 0.58,
+                affected_contracts=[fn.contract],
+                related_functions=[fn.fq_name],
+                related_state=sorted(set([*fn.reads, *fn.writes])),
+                invariant="Protocol pricing should not depend on instantly manipulable AMM spot reserves or raw token balances without TWAP, oracle hardening, or manipulation bounds.",
+                attack_preconditions=[
+                    "The pricing path reads exchange reserves, pool balances, or spot swap output.",
+                    "An attacker can trade, flash-loan, donate, or otherwise move those reserves before the priced action.",
+                    "The priced action mints, buys, redeems, liquidates, or transfers value using the manipulated quote.",
+                ],
+                exploit_sketch=[
+                    "Move the pool/exchange price with a large swap, flash loan, or temporary reserve imbalance.",
+                    f"Call {fn.fq_name} or a dependent buy/mint/redeem path while the spot quote is distorted.",
+                    "Reverse the manipulation if possible and keep the underpriced asset, excess output, or unfair liquidation result.",
+                ],
+                validation_steps=[
+                    "Identify whether the quote uses raw balanceOf/reserves or same-block AMM spot output.",
+                    "Simulate a large swap or flash-loan-like reserve change before the priced action.",
+                    "Compare protocol output against a non-manipulated reference price or time-weighted price.",
+                ],
+                contest_validity_notes=[
+                    "Strong when the manipulated quote lets an attacker buy/mint/redeem/liquidate for profit or causes protocol insolvency.",
+                    "Avoid reporting if the price source is intentionally trusted, bounded, delayed, or protected by TWAP/oracle checks.",
+                ],
+                evidence=[
+                    f"function={fn.fq_name}",
+                    f"reads={fn.reads}",
+                    f"writes={fn.writes}",
+                    f"external_calls={fn.external_calls}",
+                ],
+                tags=["oracle", "price-manipulation", "oracle-spot-price", "amm", "spot-price"],
+            )
+        )
+
+    return out
+
+
+def _generate_v36(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[Hypothesis]:
+    functions = _extract_functions(analysis)
+    hypotheses = list(_ORIGINAL_GENERATE_V36(self, analysis))
+    hypotheses.extend(_v36_oracle_price_hypotheses(functions))
+    return _dedupe_hypotheses(_precision_filter(hypotheses))
+
+
+HypothesisEngine.generate = _generate_v36
