@@ -1602,3 +1602,250 @@ def _generate_v40(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[H
 
 
 HypothesisEngine.generate = _generate_v40
+
+# --- v4.1 oracle and claim safety detectors ---
+
+_ORIGINAL_GENERATE_V41 = HypothesisEngine.generate
+
+
+def _v41_stale_oracle_price_hypotheses(functions: list[FunctionSignal]) -> list[Hypothesis]:
+    out: list[Hypothesis] = []
+
+    for fn in functions:
+        joined = " ".join([
+            fn.name.lower(),
+            fn.contract.lower(),
+            " ".join(str(x).lower() for x in fn.raw.get("notes", [])),
+            " ".join(fn.reads).lower(),
+            " ".join(fn.writes).lower(),
+            " ".join(fn.external_calls).lower(),
+            str(fn.raw).lower(),
+        ])
+
+        reads_chainlink = "latestrounddata" in joined
+        has_stale_guard = any(
+            term in joined
+            for term in (
+                "updatedat",
+                "heartbeat",
+                "stale",
+                "max_staleness",
+                "maxstaleness",
+                "answered_in_round",
+                "answeredinround",
+            )
+        )
+
+        if not (fn.is_public_entrypoint and reads_chainlink and not has_stale_guard):
+            continue
+
+        out.append(
+            Hypothesis(
+                id=_hid("stale-oracle-price", fn.fq_name),
+                title="Oracle price may be used without freshness validation",
+                severity_guess="medium",
+                confidence=0.66,
+                affected_contracts=[fn.contract],
+                related_functions=[fn.fq_name],
+                related_state=sorted(set([*fn.reads, *fn.writes])),
+                invariant="Oracle-dependent logic should validate price freshness and round completeness before using quoted values.",
+                attack_preconditions=[
+                    "The function reads oracle round data or latestRoundData.",
+                    "No updatedAt/heartbeat/staleness or answeredInRound-style validation was detected.",
+                ],
+                exploit_sketch=[
+                    "Let the oracle price become stale or delayed.",
+                    f"Call {fn.fq_name} while stale data is still accepted.",
+                    "Use outdated pricing to mint, redeem, borrow, liquidate, swap, or settle at an unfair value.",
+                ],
+                validation_steps=[
+                    "Mock latestRoundData with an old updatedAt timestamp.",
+                    "Confirm the function still accepts the stale price.",
+                    "Assess downstream value movement caused by stale pricing.",
+                ],
+                contest_validity_notes=[
+                    "Strong when stale price acceptance can cause asset loss, bad debt, or unfair settlement.",
+                    "Usually lower severity if the oracle cannot realistically become stale or the value is informational only.",
+                ],
+                evidence=[
+                    f"function={fn.fq_name}",
+                    f"notes={fn.raw.get('notes', [])}",
+                    f"reads={fn.reads}",
+                    f"writes={fn.writes}",
+                ],
+                tags=["oracle", "stale-price", "chainlink", "freshness"],
+            )
+        )
+
+    return out
+
+
+def _v41_signature_replay_noise_filter(hypotheses: list[Hypothesis]) -> list[Hypothesis]:
+    filtered: list[Hypothesis] = []
+
+    for h in hypotheses:
+        if not h.id.startswith("signature-replay:"):
+            filtered.append(h)
+            continue
+
+        joined = " ".join([
+            h.id,
+            *h.affected_contracts,
+            *h.related_functions,
+            *h.related_state,
+            *h.evidence,
+            *h.tags,
+        ]).lower()
+
+        has_replay_guard = any(
+            term in joined
+            for term in (
+                "nonce",
+                "useddigest",
+                "useddigests",
+                "usedsignature",
+                "deadline",
+                "chainid",
+                "address(this)",
+                "already_used",
+            )
+        )
+
+        if has_replay_guard:
+            continue
+
+        filtered.append(h)
+
+    return filtered
+
+
+def _generate_v41(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[Hypothesis]:
+    functions = _extract_functions(analysis)
+    hypotheses = list(_ORIGINAL_GENERATE_V41(self, analysis))
+    existing = {h.id for h in hypotheses}
+
+    for h in _v41_stale_oracle_price_hypotheses(functions):
+        if h.id not in existing:
+            hypotheses.append(h)
+            existing.add(h.id)
+
+    hypotheses = _v41_signature_replay_noise_filter(hypotheses)
+
+    return _dedupe_hypotheses(_precision_filter(hypotheses))
+
+
+HypothesisEngine.generate = _generate_v41
+
+# --- v4.2 precision: stale oracle value-flow detector ---
+
+_ORIGINAL_GENERATE_V42 = HypothesisEngine.generate
+
+
+def _v42_stale_oracle_value_flow_hypotheses(functions: list[FunctionSignal]) -> list[Hypothesis]:
+    out: list[Hypothesis] = []
+
+    for fn in functions:
+        notes = " ".join(str(x).lower() for x in fn.raw.get("notes", []))
+        calls = " ".join(fn.external_calls).lower()
+        joined = " ".join([
+            fn.name.lower(),
+            fn.contract.lower(),
+            notes,
+            calls,
+            " ".join(fn.reads).lower(),
+            " ".join(fn.writes).lower(),
+            str(fn.raw).lower(),
+        ])
+
+        uses_chainlink_oracle = (
+            "latestrounddata" in calls
+            or "getrounddata" in calls
+            or "uses chainlink-style round data" in notes
+        )
+
+        uses_answer_in_value_math = (
+            "uses oracle answer in arithmetic" in notes
+            or "writes oracle-derived value to state" in notes
+            or "pushes oracle-derived value to array" in notes
+            or "emits oracle-derived value" in notes
+        )
+
+        has_value_flow = (
+            "writes oracle-derived value to state" in notes
+            or "pushes oracle-derived value to array" in notes
+            or "emits oracle-derived value" in notes
+            or any(term in fn.name.lower() for term in ("quote", "redeem", "mint", "borrow", "liquidate", "settle", "swap"))
+        )
+
+        has_freshness_check = (
+            "has oracle freshness check" in notes
+            or "block.timestamp - updatedat" in joined.replace(" ", "")
+            or "max_staleness" in joined
+            or "maxstaleness" in joined
+            or "heartbeat" in joined
+            or "answeredinround >= roundid" in joined.replace(" ", "")
+        )
+
+        if not (fn.is_public_entrypoint and uses_chainlink_oracle and uses_answer_in_value_math and has_value_flow):
+            continue
+
+        if has_freshness_check:
+            continue
+
+        out.append(
+            Hypothesis(
+                id=_hid("stale-oracle-price", fn.fq_name),
+                title="Oracle-derived value may use stale Chainlink-style price data",
+                severity_guess="medium",
+                confidence=0.70,
+                affected_contracts=[fn.contract],
+                related_functions=[fn.fq_name],
+                related_state=sorted(set([*fn.reads, *fn.writes])),
+                invariant="Oracle-derived value calculations should validate updatedAt/heartbeat and round completeness before affecting state, accounting, events, or value-sensitive outputs.",
+                attack_preconditions=[
+                    "The function reads Chainlink-style oracle round data.",
+                    "The oracle answer is used in value math or downstream value flow.",
+                    "No real updatedAt/heartbeat/answeredInRound freshness validation was detected.",
+                ],
+                exploit_sketch=[
+                    "Oracle data becomes stale during feed outage, sequencer/network incident, or delayed update.",
+                    f"Caller invokes {fn.fq_name} while stale data is accepted.",
+                    "Protocol records, emits, or acts on outdated value, causing unfair redemption, settlement, claim, or accounting.",
+                ],
+                validation_steps=[
+                    "Mock latestRoundData with an old updatedAt timestamp.",
+                    "Confirm the function accepts the stale answer.",
+                    "Trace the oracle-derived value into state, events, arrays, accounting, or asset math.",
+                ],
+                contest_validity_notes=[
+                    "Strong when stale price affects redemption, collateral value, liquidation, mint/redeem, settlement, or user balances.",
+                    "Lower severity if the value is informational only and no on-chain/off-chain action depends on it.",
+                ],
+                evidence=[
+                    f"function={fn.fq_name}",
+                    f"external_calls={fn.external_calls}",
+                    f"notes={fn.raw.get('notes', [])}",
+                    f"reads={fn.reads}",
+                    f"writes={fn.writes}",
+                ],
+                tags=["oracle", "stale-price", "chainlink", "freshness", "value-flow"],
+            )
+        )
+
+    return out
+
+
+def _generate_v42(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[Hypothesis]:
+    functions = _extract_functions(analysis)
+    hypotheses = list(_ORIGINAL_GENERATE_V42(self, analysis))
+    existing = {h.id for h in hypotheses}
+
+    for h in _v42_stale_oracle_value_flow_hypotheses(functions):
+        if h.id not in existing:
+            hypotheses.append(h)
+            existing.add(h.id)
+
+    return _dedupe_hypotheses(_precision_filter(hypotheses))
+
+
+HypothesisEngine.generate = _generate_v42

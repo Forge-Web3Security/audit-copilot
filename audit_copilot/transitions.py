@@ -5,6 +5,7 @@ from .models import ContractInfo, StateTransition
 
 CALL_RE = re.compile(r"\.\s*(call|delegatecall|staticcall|transfer|send)\s*(?:\{|\()")
 TOKEN_CALL_RE = re.compile(r"\.(transfer|transferFrom|safeTransfer|safeTransferFrom|mint|burn)\s*\(")
+ORACLE_CALL_RE = re.compile(r"\.(latestRoundData|getRoundData|getReserves|slot0|consult)\s*\(")
 EVENT_RE = re.compile(r"emit\s+([A-Za-z_][A-Za-z0-9_]*)")
 ASSIGN_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?)\s*(?:\+\+|--|[+\-*/]?=)")
 
@@ -19,15 +20,35 @@ def extract_transitions(contracts: list[ContractInfo]) -> list[StateTransition]:
     for c in contracts:
         state_vars = state_vars_by_contract[c.name]
         for fn in c.functions:
-            if fn.view_or_pure:
-                continue
             body = fn.body
+            lowered_body = body.lower()
+
+            # Most view/pure functions are not state transitions, but oracle-dependent
+            # read functions can still be security-critical when used for quotes,
+            # mint/redeem math, settlement, liquidation, or accounting.
+            keep_security_relevant_view = (
+                fn.view_or_pure
+                and (
+                    "latestrounddata" in lowered_body
+                    or "getreserves" in lowered_body
+                    or "slot0" in lowered_body
+                    or "consult" in lowered_body
+                    or "twap" in lowered_body
+                    or "oracle" in lowered_body
+                )
+            )
+
+            if fn.view_or_pure and not keep_security_relevant_view:
+                continue
             writes = sorted({m.group(1).split("[")[0] for m in ASSIGN_RE.finditer(body) if m.group(1).split("[")[0] in state_vars})
             reads = sorted({v for v in state_vars if re.search(rf"\b{re.escape(v)}\b", body) and v not in writes})
             ext = []
             if CALL_RE.search(body):
                 ext.append("low-level external call")
             ext.extend(sorted(set(TOKEN_CALL_RE.findall(body))))
+            ext.extend(sorted(set(ORACLE_CALL_RE.findall(body))))
+            ext.extend(sorted(set(ORACLE_CALL_RE.findall(body))))
+            ext.extend(sorted(set(ORACLE_CALL_RE.findall(body))))
             auth = []
             if fn.modifiers:
                 auth.extend(fn.modifiers)
@@ -40,6 +61,7 @@ def extract_transitions(contracts: list[ContractInfo]) -> list[StateTransition]:
             timing = [h for h in TIME_HINTS if h in body.lower() or h in body]
             notes = []
             notes.extend(_body_notes(body))
+            notes.extend(_oracle_value_flow_notes(body, state_vars))
             notes.extend(_cei_order_notes(body, state_vars))
             if ext and writes:
                 notes.append("external interaction and storage write appear in same transition; check CEI and reentrancy assumptions")
@@ -186,5 +208,85 @@ def _cei_order_notes(body: str, state_vars: set[str]) -> list[str]:
     else:
         notes.append("external interaction appears before state write")
         notes.append("cei interaction-before-effects ordering")
+
+    return notes
+
+
+def _oracle_value_flow_notes(body: str, state_vars: set[str]) -> list[str]:
+    lowered = body.lower()
+    notes: list[str] = []
+
+    uses_oracle_call = (
+        "latestrounddata" in lowered
+        or "getrounddata" in lowered
+        or "getreserves" in lowered
+        or "slot0" in lowered
+        or "consult" in lowered
+    )
+
+    if not uses_oracle_call and "answer" not in lowered and "price" not in lowered:
+        return notes
+
+    if uses_oracle_call:
+        notes.append("uses oracle call")
+
+    if "latestrounddata" in lowered or "getrounddata" in lowered:
+        notes.append("uses chainlink-style round data")
+
+    if "answer" in lowered:
+        notes.append("reads oracle answer")
+
+    oracle_answer_math = (
+        "answer)" in lowered
+        or "uint256(answer)" in lowered
+        or "* uint256(answer)" in lowered
+        or "uint256(answer) /" in lowered
+        or "* answer" in lowered
+        or "answer /" in lowered
+    )
+
+    if oracle_answer_math:
+        notes.append("uses oracle answer in arithmetic")
+
+    if "updatedat" in lowered:
+        notes.append("reads oracle updatedAt")
+
+    if "answeredinround" in lowered:
+        notes.append("reads oracle answeredInRound")
+
+    freshness_patterns = (
+        "block.timestamp - updatedat",
+        "updatedat +",
+        "updatedat >=",
+        "updatedat!=",
+        "updatedat !=",
+        "max_staleness",
+        "maxstaleness",
+        "heartbeat",
+        "stale_price",
+        "staleprice",
+        "stale_oracle",
+        "staleoracle",
+        "answeredinround >= roundid",
+    )
+
+    if any(pattern in lowered.replace(" ", "") for pattern in freshness_patterns):
+        notes.append("has oracle freshness check")
+    elif uses_oracle_call and ("updatedat" in lowered or "answer" in lowered):
+        notes.append("missing oracle freshness check")
+
+    writes_oracle_value = any(
+        state_var.lower() in lowered and ("answer" in lowered or "usdvalue" in lowered or "price" in lowered)
+        for state_var in state_vars
+    )
+
+    if writes_oracle_value:
+        notes.append("writes oracle-derived value to state")
+
+    if ".push(" in lowered and ("answer" in lowered or "usdvalue" in lowered or "price" in lowered):
+        notes.append("pushes oracle-derived value to array")
+
+    if "emit " in lowered and ("answer" in lowered or "usdvalue" in lowered or "price" in lowered):
+        notes.append("emits oracle-derived value")
 
     return notes
