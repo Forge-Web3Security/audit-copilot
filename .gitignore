@@ -4,4 +4,17 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 reports/
+node_modules/
+dist/
+build/
+.cache/
+coverage/
+
+.env
+.env.*
+*.log
+
+ollama-models/
+reports/tmp/
+
 .DS_Store
