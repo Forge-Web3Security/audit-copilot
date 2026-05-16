@@ -25,6 +25,14 @@ from .session import (
     load_audit_context,
     mark_invalid as mark_context_invalid,
 )
+from .ai_agent import (
+    generate_agent_prompt,
+    hypotheses_to_findings,
+)
+from .reporting_cyfrin import (
+    write_cyfrin_report,
+    write_threat_model,
+)
 
 app = typer.Typer(help="Invariant-first smart contract audit copilot")
 console = Console()
@@ -37,10 +45,11 @@ def analyze(
     out: Path = typer.Option(Path("reports/analysis"), help="Output directory"),
     slither: Path | None = typer.Option(None, help="Optional Slither JSON output"),
     aderyn: Path | None = typer.Option(None, help="Optional Aderyn JSON output"),
+    mythril: Path | None = typer.Option(None, help="Optional Mythril JSON output"),
     context: Path | None = typer.Option(None, help="Optional project-local audit_context.json"),
 ):
     """Analyze a Solidity project and produce model, invariants, findings, and report."""
-    result = analyze_project(root, platform, str(slither) if slither else None, str(aderyn) if aderyn else None)
+    result = analyze_project(root, platform, str(slither) if slither else None, str(aderyn) if aderyn else None, str(mythril) if mythril else None)
     write_outputs(result, out, context)
 
     table = Table(title="Audit Copilot Summary")
@@ -56,6 +65,12 @@ def analyze(
     console.print(f"[green]Wrote:[/green] {out / 'report.md'}")
     console.print(f"[green]Wrote:[/green] {out / 'hypotheses.json'}")
     console.print(f"[green]Wrote:[/green] {out / 'hypotheses.md'}")
+    if slither:
+        console.print(f"[green]Loaded Slither signals:[/green] {slither}")
+    if aderyn:
+        console.print(f"[green]Loaded Aderyn signals:[/green] {aderyn}")
+    if mythril:
+        console.print(f"[green]Loaded Mythril signals:[/green] {mythril}")
     if context:
         console.print(f"[green]Used context:[/green] {context}")
 
@@ -214,6 +229,48 @@ def show_context_command(
     """Show the current project-local audit context."""
     audit_context = load_audit_context(context)
     console.print_json(audit_context.model_dump_json())
+
+
+@app.command("agent-prompt")
+def agent_prompt_command(
+    analysis_json: Path = typer.Argument(..., exists=True, file_okay=True, dir_okay=False),
+    platform: Platform = typer.Option(Platform.sherlock, help="Contest platform"),
+):
+    """Generate an AI agent prompt from analysis.json for assisted auditing."""
+    analysis = load_analysis_json(analysis_json)
+    result = AnalysisResult.model_validate(analysis)
+    from .analysis.hypothesis_engine import generate_hypotheses
+    hypotheses = generate_hypotheses(analysis)
+    prompt = generate_agent_prompt(result, hypotheses, platform.value)
+    console.print(prompt)
+
+
+@app.command("cyfrin-report")
+def cyfrin_report_command(
+    analysis_json: Path = typer.Argument(..., exists=True, file_okay=True, dir_okay=False),
+    out: Path = typer.Option(Path("reports/cyfrin-report.md"), help="Output report path"),
+    platform: Platform = typer.Option(Platform.sherlock, help="Contest platform"),
+):
+    """Generate a Cyfrin-format audit report from analysis.json."""
+    analysis = load_analysis_json(analysis_json)
+    result = AnalysisResult.model_validate(analysis)
+    from .analysis.hypothesis_engine import generate_hypotheses
+    hypotheses = generate_hypotheses(analysis)
+    findings_data = hypotheses_to_findings(hypotheses, analysis)
+    written = write_cyfrin_report(result, hypotheses, out, platform.value, findings_data)
+    console.print(f"[green]Wrote Cyfrin report:[/green] {written}")
+
+
+@app.command("threat-model")
+def threat_model_command(
+    analysis_json: Path = typer.Argument(..., exists=True, file_okay=True, dir_okay=False),
+    out: Path = typer.Option(Path("reports/threat-model.md"), help="Output threat model path"),
+):
+    """Generate a threat model document from analysis.json."""
+    analysis = load_analysis_json(analysis_json)
+    result = AnalysisResult.model_validate(analysis)
+    written = write_threat_model(result, out)
+    console.print(f"[green]Wrote threat model:[/green] {written}")
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ INVALID_KEYWORDS = {
     "zero-address validation only": ["zero address", "address(0)"],
     "theoretical without exploit path": ["theoretical", "informational"],
     "oracle-only issue may be out of scope": ["oracle", "stale price", "price feed"],
+    "whitelist/allowlist design choice": ["whitelist", "allowlist", "onlywhitelisted"],
 }
 
 PLATFORM_STYLE = {
@@ -16,6 +17,62 @@ PLATFORM_STYLE = {
     Platform.codehawks: "Prioritize correctness bugs with crisp proof and simple reproduction.",
     Platform.immunefi: "Prioritize direct fund loss, severity proof, and concrete exploit path.",
     Platform.generic: "Prioritize realistic impact and reproducible proof.",
+}
+
+SEVERITY_MAP = {
+    "high": {
+        Platform.sherlock: "High",
+        Platform.code4rena: "High",
+        Platform.codehawks: "High",
+        Platform.immunefi: "Critical",
+        Platform.generic: "High",
+    },
+    "medium": {
+        Platform.sherlock: "Medium",
+        Platform.code4rena: "Medium",
+        Platform.codehawks: "Medium",
+        Platform.immunefi: "High",
+        Platform.generic: "Medium",
+    },
+    "low": {
+        Platform.sherlock: "Low",
+        Platform.code4rena: "Low",
+        Platform.codehawks: "Low",
+        Platform.immunefi: "Medium",
+        Platform.generic: "Low",
+    },
+}
+
+PLATFORM_VALIDATION_STEPS = {
+    Platform.sherlock: [
+        "Sherlock: Demonstrate a realistic end-to-end call sequence with material loss.",
+        "Sherlock: Confirm the issue is not admin-only — if admin action is required and trusted, it may be invalid.",
+        "Sherlock: Check that the attack does not rely on out-of-scope assumptions (weird tokens, oracle failure).",
+        "Sherlock: Rule out duplicate grouping — ensure the root cause is distinct from similar findings.",
+    ],
+    Platform.code4rena: [
+        "C4: Identify the clear root cause and demonstrate impact breadth (affects multiple users/paths).",
+        "C4: Write a minimal reproducible PoC — C4 judges prioritize crisp, self-contained tests.",
+        "C4: Frame the finding to resist duping — make the root cause, impact, and fix distinct.",
+        "C4: Check if the issue is only valid under specific contest assumptions (weird tokens, admin trust).",
+    ],
+    Platform.codehawks: [
+        "CodeHawks: Provide a correctness proof showing the invariant violation.",
+        "CodeHawks: Keep the PoC minimal and simple — complex multi-step exploits are harder to validate.",
+        "CodeHawks: Confirm the bug is a genuine correctness issue, not a design trade-off.",
+        "CodeHawks: Ensure the exploit reproduces reliably (not probabilistic).",
+    ],
+    Platform.immunefi: [
+        "Immunefi: Demonstrate DIRECT fund loss — Immunefi pays bounties for provable loss of value.",
+        "Immunefi: Provide full end-to-end exploit with exact profit calculation.",
+        "Immunefi: Confirm no external assumptions — the exploit should work against mainnet state.",
+        "Immunefi: Severity must match bounty payout tier — Critical for direct fund loss, High for indirect.",
+    ],
+    Platform.generic: [
+        "Generic: Reproduce the exploit with a clear pre-state, action sequence, and post-state.",
+        "Generic: Quantify the impact — fund loss, DoS duration, accounting drift, or privilege escalation.",
+        "Generic: Document any assumptions (admin trust, token behavior, oracle liveness).",
+    ],
 }
 
 
@@ -46,6 +103,15 @@ def assess_transition(t: StateTransition) -> ExploitabilityAssessment:
     )
 
 
+def platform_severity(sev: str, platform: Platform) -> str:
+    mapped = SEVERITY_MAP.get(sev, {}).get(platform)
+    return mapped or sev.capitalize()
+
+
+def platform_steps(platform: Platform) -> list[str]:
+    return PLATFORM_VALIDATION_STEPS.get(platform, PLATFORM_VALIDATION_STEPS[Platform.generic])
+
+
 def generate_findings(platform: Platform, transitions: list[StateTransition], invariants: list[InvariantCandidate], signals: list[ScannerSignal]) -> list[FindingCandidate]:
     findings: list[FindingCandidate] = []
     idx = 1
@@ -65,9 +131,10 @@ def generate_findings(platform: Platform, transitions: list[StateTransition], in
             related_invariants=related_inv,
             related_transitions=[f"{t.contract}.{t.function}"],
             assessment=assessment,
-            severity_guess=sev,
+            severity_guess=platform_severity(sev, platform) if sev != "informational" else "informational",
             next_validation_steps=[
                 PLATFORM_STYLE[platform],
+                *platform_steps(platform),
                 "Write the minimal Foundry PoC sequence: setup → manipulate state → trigger vulnerable transition → assert profit/loss.",
                 "Check whether assumptions are out of scope: admin action, malicious token, external oracle/integration, or no material loss.",
             ],
@@ -81,6 +148,7 @@ def generate_findings(platform: Platform, transitions: list[StateTransition], in
             if any(k in text for k in keys):
                 invalid.append(reason)
         material = any(k in text for k in ["reentrancy", "arbitrary", "unchecked", "delegatecall", "selfdestruct", "price", "withdraw", "transfer"])
+        sev = "medium" if material and not invalid else "informational"
         findings.append(FindingCandidate(
             id=f"F-{idx:03d}",
             title=f"Triage scanner signal: {s.title}",
@@ -96,8 +164,9 @@ def generate_findings(platform: Platform, transitions: list[StateTransition], in
                 invalid_reasons=invalid,
                 notes=["Do not report raw scanner output without a realistic exploit path."],
             ),
-            severity_guess="medium" if material and not invalid else "informational",
+            severity_guess=platform_severity(sev, platform) if sev != "informational" else "informational",
             next_validation_steps=[
+                *platform_steps(platform),
                 "Map this signal to protocol invariant failure, not just a code smell.",
                 "Prove attacker permissions and repeatability.",
                 "Discard if it is only best-practice, gas-only, admin-only, or no-loss.",

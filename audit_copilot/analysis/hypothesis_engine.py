@@ -1602,3 +1602,350 @@ def _generate_v40(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[H
 
 
 HypothesisEngine.generate = _generate_v40
+
+# --- v4.1 high/critical Archetypes: whitelist trap, reclaim drain, bad debt, virtual share, dust liq, read-only reentrancy ---
+
+_ORIGINAL_GENERATE_V41 = HypothesisEngine.generate
+
+
+def _v41_whitelist_trap_hypotheses(functions: list[FunctionSignal]) -> list[Hypothesis]:
+    out: list[Hypothesis] = []
+
+    for fn in functions:
+        fn_name = fn.name.lower()
+        notes = " ".join(str(x).lower() for x in fn.raw.get("notes", []))
+        joined = " ".join([fn_name, fn.contract.lower(), notes, " ".join(fn.modifiers).lower(), " ".join(fn.reads).lower(), " ".join(fn.writes).lower(), " ".join(fn.authorization_hints).lower()])
+
+        is_exit_path = any(k in fn_name for k in ("withdraw", "getreward", "get_reward", "exit", "unstake"))
+        has_whitelist_modifier = any(k in joined for k in ("onlywhitelisted", "onlywhitelist", "whitelisted"))
+        has_owner_or_admin_auth = any(k in joined for k in ("onlyowner", "onlyadmin", "onlyrole"))
+
+        if not (fn.is_public_entrypoint and is_exit_path and has_whitelist_modifier):
+            continue
+
+        out.append(
+            Hypothesis(
+                id=_hid("whitelist-trap", fn.fq_name),
+                title="Access control on exit path may trap user principal and rewards",
+                severity_guess="high",
+                confidence=0.75,
+                affected_contracts=[fn.contract],
+                related_functions=[fn.fq_name],
+                related_state=sorted(set([*fn.reads, *fn.writes])),
+                invariant="User exit paths (withdraw, getReward, unstake) should not be gated by the same access control as entry. Users who can stake should always be able to withdraw their principal and claim rewards.",
+                attack_preconditions=[
+                    "An access control modifier (onlyWhitelisted, onlyRole, etc.) is applied to withdraw/getReward/exit paths.",
+                    "A user who is later removed from the whitelist/role has unclaimed principal or rewards.",
+                ],
+                exploit_sketch=[
+                    "User stakes assets and accrues rewards while whitelisted.",
+                    f"Admin removes user from whitelist (calls removeFromWhitelist for {fn.fq_name} path).",
+                    f"User calls {fn.fq_name} and it reverts with access control error.",
+                    "User principal and rewards are permanently trapped in the contract.",
+                ],
+                validation_steps=[
+                    "Confirm the modifier on withdraw/getReward matches the modifier on stake.",
+                    "Write a Foundry test: whitelist user, stake, remove from whitelist, attempt withdraw.",
+                    "Verify user funds are permanently locked.",
+                ],
+                contest_validity_notes=[
+                    "High severity when user funds are at risk. Valid on all platforms (Sherlock, Code4rena, CodeHawks).",
+                    "Medium if admin is trusted and cannot rug, but the design still violates user expectations.",
+                ],
+                evidence=[f"modifiers={fn.modifiers}", f"auth_hints={fn.authorization_hints}"],
+                tags=["access-control", "whitelist", "funds-trap", "high"],
+            )
+        )
+
+    return out
+
+
+def _v41_reclaim_drain_hypotheses(functions: list[FunctionSignal]) -> list[Hypothesis]:
+    out: list[Hypothesis] = []
+
+    for fn in functions:
+        fn_name = fn.name.lower()
+        notes = " ".join(str(x).lower() for x in fn.raw.get("notes", []))
+        joined = " ".join([fn_name, fn.contract.lower(), notes, " ".join(fn.reads).lower(), " ".join(fn.writes).lower(), str(fn.raw).lower(), fn.body.lower()])
+
+        is_reclaim = "reclaim" in fn_name or "recover" in fn_name
+        drains_balance = any(k in joined for k in ("balanceof(address(this))", "balanceof(address(this))", "balance", "rewardstoken"))
+        has_reward_accounting = any(k in joined for k in ("rewards[", "reward", "rewards(", "earned"))
+        is_admin = bool(fn.modifiers) or any(k in joined for k in ("onlyowner", "onlyadmin"))
+        # Exclude implementations that zero user claims before draining
+        zeros_claims = any(k in joined for k in ("rewards[", "= 0", "stakers"))
+
+        if not (fn.is_public_entrypoint and is_reclaim and drains_balance and has_reward_accounting and is_admin and not zeros_claims):
+            continue
+
+        out.append(
+            Hypothesis(
+                id=_hid("reclaim-drain", fn.fq_name),
+                title="Admin reclaim may drain reward reserves without clearing user claims",
+                severity_guess="high",
+                confidence=0.72,
+                affected_contracts=[fn.contract],
+                related_functions=[fn.fq_name],
+                related_state=sorted(set([*fn.reads, *fn.writes])),
+                invariant="Admin reclaim/recover functions should zero all user reward claims before or while draining the reward token balance.",
+                attack_preconditions=[
+                    "An admin-only reclaim/recover function transfers all reward tokens to the owner.",
+                    "User reward accounting is not zeroed before the transfer.",
+                    "After reclaim, users calling getReward() will revert due to insufficient reward token balance.",
+                ],
+                exploit_sketch=[
+                    "Users stake and accrue rewards recorded in the rewards mapping.",
+                    f"Admin calls {fn.fq_name} which transfers the entire reward token balance to the owner.",
+                    "User reward claims in storage remain nonzero but reward balance is zero.",
+                    "User calls getReward() which reverts because transfer() fails.",
+                ],
+                validation_steps=[
+                    "Check whether reclaim() iterates over stakers to zero rewards before transferring.",
+                    "Test sequence: stake -> accrue rewards -> reclaim -> attempt getReward.",
+                    "Assert getReward reverts after reclaim.",
+                ],
+                contest_validity_notes=[
+                    "High severity if admin can brick user reward claims. Valid on all platforms.",
+                    "Medium if admin is fully trusted per contest rules, but the design is still fragile.",
+                ],
+                evidence=[f"reads={fn.reads}", f"writes={fn.writes}", f"modifiers={fn.modifiers}"],
+                tags=["access-control", "rewards", "reclaim", "high", "admin"],
+            )
+        )
+
+    return out
+
+
+def _v41_bad_debt_socialization_hypotheses(functions: list[FunctionSignal]) -> list[Hypothesis]:
+    out: list[Hypothesis] = []
+
+    for fn in functions:
+        fn_name = fn.name.lower()
+        joined = " ".join([fn_name, fn.contract.lower(), " ".join(fn.reads).lower(), " ".join(fn.writes).lower(), " ".join(fn.external_calls).lower(), str(fn.raw).lower(), fn.body.lower()])
+
+        is_liquidation = "liquidat" in fn_name
+        has_zero_collateral_check = "collateral == 0" in joined or "collateral==0" in joined or "pos.collateral == 0" in joined
+        has_bad_debt = "baddebt" in joined or "bad_debt" in joined or "totalbaddebt" in joined
+
+        if not (fn.is_public_entrypoint and is_liquidation and has_zero_collateral_check):
+            continue
+
+        out.append(
+            Hypothesis(
+                id=_hid("bad-debt-socialization", fn.fq_name),
+                title="Bad debt crystallization uses exact-zero check, allowing 1-wei collateral evasion",
+                severity_guess="high",
+                confidence=0.74,
+                affected_contracts=[fn.contract],
+                related_functions=[fn.fq_name],
+                related_state=sorted(set([*fn.reads, *fn.writes])),
+                invariant="Bad debt should be crystallized when collateral reaches zero or below (<= 0), not only on exact equality (== 0).",
+                attack_preconditions=[
+                    "Liquidation uses `if (collateral == 0)` instead of `if (collateral <= 0)`.",
+                    "A liquidator can leave exactly 1 wei of collateral to avoid bad debt crystallization.",
+                    "Unsocialized bad debt remains in totalBorrow while suppliers cannot fully withdraw.",
+                ],
+                exploit_sketch=[
+                    "Borrower position becomes underwater.",
+                    f"Liquidator calls {fn.fq_name} with partial liquidation leaving 1 wei collateral.",
+                    "Bad debt is not crystallized due to exact-zero check.",
+                    "Other suppliers front-run the final liquidation and exit, leaving remaining users holding the bad debt.",
+                ],
+                validation_steps=[
+                    "Search for `== 0` vs `<= 0` in liquidation functions.",
+                    "Test: partially liquidate leaving 1 wei, check if bad debt is registered.",
+                    "Assert that totalBadDebt accurately reflects uncollateralized debt.",
+                ],
+                contest_validity_notes=[
+                    "High severity - can lead to unfair loss socialization. Valid on all platforms.",
+                    "Critical if it allows MEV to extract value from passive suppliers.",
+                ],
+                evidence=[f"function={fn.fq_name}", f"body_contains_zero_check"],
+                tags=["liquidation", "bad-debt", "socialization", "high"],
+            )
+        )
+
+    return out
+
+
+def _v41_virtual_share_leakage_hypotheses(functions: list[FunctionSignal]) -> list[Hypothesis]:
+    out: list[Hypothesis] = []
+
+    for fn in functions:
+        fn_name = fn.name.lower()
+        joined = " ".join([fn_name, fn.contract.lower(), " ".join(fn.reads).lower(), " ".join(fn.writes).lower(), str(fn.raw).lower()])
+
+        is_conversion = any(k in fn_name for k in ("converttoshare", "convertoassets", "converttoshare", "convertoasset"))
+        has_virtual = any(k in joined for k in ("virtual", "virtual_supply", "virtual_borrow", "virtualshare", "virtualasset"))
+
+        if not (is_conversion and has_virtual):
+            continue
+
+        out.append(
+            Hypothesis(
+                id=_hid("virtual-share-leakage", fn.fq_name),
+                title="Virtual shares in conversion math may dilute real supplier claims",
+                severity_guess="high",
+                confidence=0.68,
+                affected_contracts=[fn.contract],
+                related_functions=[fn.fq_name],
+                related_state=sorted(set([*fn.reads, *fn.writes])),
+                invariant="Virtual shares should not participate in share-to-asset conversion math unless their value contribution is explicitly accounted for.",
+                attack_preconditions=[
+                    "Virtual supply shares are included in the denominator of convertToAssets/convertToShares.",
+                    "Virtual shares have no real owner who can claim the corresponding assets.",
+                    "In tiny markets, virtual shares absorb a disproportionate share of economic growth.",
+                ],
+                exploit_sketch=[
+                    "Deploy a market with virtual supply shares.",
+                    "Real supplier deposits assets but receives fewer shares due to virtual dilution.",
+                    "Protocol accrues value (fees, interest).",
+                    "Virtual shares claim a portion of accrued value with no real owner to distribute it to.",
+                ],
+                validation_steps=[
+                    "Verify virtual shares are excluded from conversion math or have explicit offset accounting.",
+                    "Test tiny market: supply dust amount, accrue value, compare real supplier claim vs total assets.",
+                    "Assert totalAssets can be fully withdrawn by real suppliers.",
+                ],
+                contest_validity_notes=[
+                    "High severity in tiny/fresh markets. Valid on Sherlock, Code4rena, CodeHawks.",
+                    "Lower severity in mature markets where virtual share dilution is negligible.",
+                ],
+                evidence=[f"function={fn.fq_name}", f"reads={fn.reads}", f"writes={fn.writes}"],
+                tags=["virtual-shares", "accounting", "dilution", "high"],
+            )
+        )
+
+    return out
+
+
+def _v41_dust_liquidation_hypotheses(functions: list[FunctionSignal]) -> list[Hypothesis]:
+    out: list[Hypothesis] = []
+
+    for fn in functions:
+        fn_name = fn.name.lower()
+        joined = " ".join([fn_name, fn.contract.lower(), " ".join(fn.writes).lower(), " ".join(fn.external_calls).lower(), " ".join(fn.reads).lower(), str(fn.raw).lower()])
+
+        is_liquidation = "liquidat" in fn_name
+        has_multiple_paths = any(k in joined for k in ("seized", "repaid", "byseized", "byrepaid", "seizedassets", "repaidshares"))
+
+        if not (fn.is_public_entrypoint and is_liquidation and has_multiple_paths):
+            continue
+
+        out.append(
+            Hypothesis(
+                id=_hid("dust-liquidation-rounding", fn.fq_name),
+                title="Multiple liquidation paths with asymmetric rounding may enable unfair collateral extraction",
+                severity_guess="high",
+                confidence=0.65,
+                affected_contracts=[fn.contract],
+                related_functions=[fn.fq_name],
+                related_state=sorted(set([*fn.reads, *fn.writes])),
+                invariant="All liquidation paths should produce equivalent economic outcomes. Caller-controlled path selection should not create profitable rounding asymmetry.",
+                attack_preconditions=[
+                    "Liquidation offers caller-controlled branches: specify seizedAssets or repaidShares.",
+                    "Rounding direction differs between branches.",
+                    "Tiny/dust amounts can exploit the asymmetry.",
+                ],
+                exploit_sketch=[
+                    "Create a borrower position near a liquidation threshold.",
+                    f"Call {fn.fq_name} on both paths with dust amounts.",
+                    "Compare collateral seized vs debt repaid across paths.",
+                    "Use the more favorable path to extract excess collateral or reduce debt unfairly.",
+                ],
+                validation_steps=[
+                    "Test both liquidation branches with identical parameters.",
+                    "Compare collateral-to-debt ratios between paths.",
+                    "Fuzz tiny amounts and assert economic equivalence.",
+                ],
+                contest_validity_notes=[
+                    "High if exploitable asymmetry exists. Valid on all platforms.",
+                    "Medium if the asymmetry requires impractical conditions (dust-only, very small markets).",
+                ],
+                evidence=[f"function={fn.fq_name}", f"multiple_liquidation_paths"],
+                tags=["liquidation", "rounding", "dust", "high"],
+            )
+        )
+
+    return out
+
+
+def _v41_read_only_reentrancy_hypotheses(functions: list[FunctionSignal]) -> list[Hypothesis]:
+    out: list[Hypothesis] = []
+
+    for fn in functions:
+        fn_name = fn.name.lower()
+        notes = " ".join(str(x).lower() for x in fn.raw.get("notes", []))
+        joined = " ".join([fn_name, fn.contract.lower(), notes, " ".join(fn.reads).lower(), " ".join(fn.writes).lower(), " ".join(fn.external_calls).lower(), str(fn.raw).lower()])
+
+        is_withdraw_like = any(k in fn_name for k in ("withdraw", "redeem", "unstake"))
+        has_external_call = bool(fn.external_calls) or ".call" in joined or "{value:" in joined
+
+        # CEI violated: external interaction appears BEFORE state write (vulnerable pattern)
+        cei_violated = "cei interaction-before-effects ordering" in notes or "external interaction appears before state write" in notes
+        # CEI safe: state write appears BEFORE external interaction (safe pattern)
+        cei_safe = "cei effects-before-interaction ordering" in notes or "state write appears before external interaction" in notes
+
+        if not (fn.is_public_entrypoint and is_withdraw_like and has_external_call and cei_violated and not cei_safe):
+            continue
+
+        out.append(
+            Hypothesis(
+                id=_hid("read-only-reentrancy", fn.fq_name),
+                title="External call before state update enables read-only reentrancy on view functions",
+                severity_guess="high",
+                confidence=0.65,
+                affected_contracts=[fn.contract],
+                related_functions=[fn.fq_name],
+                related_state=sorted(set([*fn.reads, *fn.writes])),
+                invariant="State should be updated before external calls to prevent read-only reentrancy on view functions that read the same state.",
+                attack_preconditions=[
+                    "A state-changing function makes an external call before updating critical state.",
+                    "View functions (totalAssets, balanceOf, etc.) read the state that is updated after the call.",
+                    "An attacker can reenter through the callback and observe/view manipulated state.",
+                ],
+                exploit_sketch=[
+                    f"Call {fn.fq_name} with an attacker contract that has a receive/callback hook.",
+                    "During the callback before state update, call view functions on other protocols.",
+                    "Those protocols observe the stale (pre-update) state and make decisions based on it.",
+                    "After callback returns, state is updated, potentially creating an arbitrage or liquidation opportunity.",
+                ],
+                validation_steps=[
+                    "Confirm CEI violation: external call before state write.",
+                    "Identify view functions that read the same state variables.",
+                    "Write Foundry PoC showing a third-party protocol reading manipulated state during callback.",
+                ],
+                contest_validity_notes=[
+                    "High severity when the read-only reentrancy impacts other protocols (Balancer-style).",
+                    "Medium when only affects internal accounting read by view functions.",
+                ],
+                evidence=[f"reads={fn.reads}", f"writes={fn.writes}", f"external_calls={fn.external_calls}", f"notes={fn.raw.get('notes', [])}"],
+                tags=["reentrancy", "read-only", "cei", "high"],
+            )
+        )
+
+    return out
+
+
+def _generate_v41(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[Hypothesis]:
+    functions = _extract_functions(analysis)
+    hypotheses = list(_ORIGINAL_GENERATE_V41(self, analysis))
+    existing = {h.id for h in hypotheses}
+
+    for detector in (
+        _v41_whitelist_trap_hypotheses,
+        _v41_reclaim_drain_hypotheses,
+        _v41_bad_debt_socialization_hypotheses,
+        _v41_virtual_share_leakage_hypotheses,
+        _v41_dust_liquidation_hypotheses,
+        _v41_read_only_reentrancy_hypotheses,
+    ):
+        for h in detector(functions):
+            if h.id not in existing:
+                hypotheses.append(h)
+                existing.add(h.id)
+
+    return _dedupe_hypotheses(_precision_filter(hypotheses))
+
+
+HypothesisEngine.generate = _generate_v41

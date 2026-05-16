@@ -49,3 +49,55 @@ def load_aderyn(path: str | None) -> list[ScannerSignal]:
             raw=f,
         ))
     return signals
+
+
+def load_mythril(path: str | None) -> list[ScannerSignal]:
+    if not path:
+        return []
+    data = json.loads(Path(path).read_text())
+
+    if isinstance(data, dict):
+        issues = data.get("issues", data.get("results", []))
+    else:
+        issues = data
+
+    if not isinstance(issues, list):
+        issues = []
+
+    signals: list[ScannerSignal] = []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+
+        check = issue.get("type") or issue.get("swc-id") or issue.get("check", "unknown")
+        title = issue.get("title") or issue.get("name") or issue.get("check", "Mythril signal")
+        severity = issue.get("severity")
+        if severity:
+            severity = severity.capitalize()
+
+        contract = issue.get("contract") or issue.get("contract_name")
+        function = issue.get("function") or issue.get("function_name")
+        description = (
+            issue.get("description")
+            or issue.get("head")
+            or issue.get("body")
+            or ""
+        )
+
+        line = issue.get("lineno") or issue.get("line")
+        source_path = issue.get("source") or issue.get("file") or issue.get("path")
+
+        signals.append(ScannerSignal(
+            tool="mythril",
+            check=check,
+            severity=severity,
+            title=title,
+            description=str(description)[:2000],
+            contract=contract,
+            function=function,
+            path=source_path,
+            line=int(line) if line is not None else None,
+            raw=issue,
+        ))
+
+    return signals

@@ -9,18 +9,18 @@ from .modeler import build_protocol_model
 from .models import AnalysisResult, Platform
 from .reporting import write_json, write_markdown
 from .analysis.hypothesis_engine import generate_hypotheses, hypotheses_to_markdown
-from .scanners import load_aderyn, load_slither
+from .scanners import load_aderyn, load_mythril, load_slither
 from .session import apply_context_to_hypotheses, load_audit_context
 from .solidity_parser import collect_contracts
 from .transitions import extract_transitions
 
 
-def analyze_project(root: str | Path, platform: Platform = Platform.generic, slither_json: str | None = None, aderyn_json: str | None = None) -> AnalysisResult:
+def analyze_project(root: str | Path, platform: Platform = Platform.generic, slither_json: str | None = None, aderyn_json: str | None = None, mythril_json: str | None = None) -> AnalysisResult:
     contracts = collect_contracts(root)
     model = build_protocol_model(root, contracts)
     transitions = extract_transitions(contracts)
     invariants = generate_invariants(model, transitions)
-    scanner_signals = load_slither(slither_json) + load_aderyn(aderyn_json)
+    scanner_signals = load_slither(slither_json) + load_aderyn(aderyn_json) + load_mythril(mythril_json)
     findings = generate_findings(platform, transitions, invariants, scanner_signals)
     return AnalysisResult(
         platform=platform,
