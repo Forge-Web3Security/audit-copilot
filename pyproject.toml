@@ -1,0 +1,20 @@
+[project]
+name = "audit-copilot"
+version = "0.1.0"
+description = "Invariant-first smart contract audit copilot starter kit"
+requires-python = ">=3.10"
+dependencies = [
+  "typer>=0.12.0",
+  "pydantic>=2.7.0",
+  "rich>=13.7.0"
+]
+
+[project.scripts]
+audit-copilot = "audit_copilot.cli:app"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["audit_copilot*"]
