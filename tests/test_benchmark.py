@@ -82,3 +82,19 @@ def test_benchmark_markdown_includes_health_sections():
     assert "## Full observed hypotheses" in markdown
     assert "Positive fixtures" in markdown
     assert "positive" in markdown
+def test_expected_hypothesis_prefix_matches_observed_child_id():
+    fixture = BenchmarkFixture(
+        name="sample-vault",
+        path="examples/sample_protocol",
+        expected_hypotheses=["share-manipulation"],
+    )
+
+    result = run_fixture(fixture, fixture.path)
+
+    assert result.passed
+    assert result.missing_hypotheses == []
+    assert "share-manipulation" in result.matched_hypotheses
+    assert any(
+        item.startswith("share-manipulation:")
+        for item in result.observed_hypotheses
+    )

@@ -1,7 +1,34 @@
-.venv/
+# Python cache
 __pycache__/
-*.pyc
-*.egg-info/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test/cache output
 .pytest_cache/
-reports/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Packaging/build artifacts
+build/
+dist/
+*.egg-info/
+
+# Local/editor files
+.env
+.env.*
+!.env.example
 .DS_Store
+.idea/
+.vscode/
+
+# Audit Copilot generated outputs
+reports/sample/
+reports/tmp/
+workspace/
