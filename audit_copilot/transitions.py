@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from .models import ContractInfo, StateTransition
 
-CALL_RE = re.compile(r"\.\s*(call|delegatecall|staticcall|transfer|send)\s*(?:\{|\()")
+CALL_RE = re.compile(r"\.\s*(call|delegatecall|staticcall|send)\s*(?:\{|\()")
 TOKEN_CALL_RE = re.compile(r"\.(transfer|transferFrom|safeTransfer|safeTransferFrom|mint|burn)\s*\(")
 EVENT_RE = re.compile(r"emit\s+([A-Za-z_][A-Za-z0-9_]*)")
 ASSIGN_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?)\s*(?:\+\+|--|[+\-*/]?=)")
