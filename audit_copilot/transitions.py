@@ -33,8 +33,17 @@ def extract_transitions(contracts: list[ContractInfo]) -> list[StateTransition]:
                 auth.extend(fn.modifiers)
             auth.extend([h for h in AUTH_HINTS if h in body])
             assets = []
-            if "msg.value" in body or fn.payable:
+            body_lower = body.lower()
+
+            if (
+                "msg.value" in body
+                or fn.payable
+                or ".call{value" in body_lower
+                or ".call {value" in body_lower
+                or ".send(" in body_lower
+            ):
                 assets.append("native ETH movement")
+
             if TOKEN_CALL_RE.search(body):
                 assets.append("token movement/mint/burn")
             timing = [h for h in TIME_HINTS if h in body.lower() or h in body]
