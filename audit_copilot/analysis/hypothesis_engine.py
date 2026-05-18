@@ -1602,3 +1602,126 @@ def _generate_v40(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[H
 
 
 HypothesisEngine.generate = _generate_v40
+
+# --- v4.1 stale oracle freshness detector ---
+
+_ORIGINAL_GENERATE_V41 = HypothesisEngine.generate
+
+
+def _v41_stale_oracle_price_hypotheses(functions: list[FunctionSignal]) -> list[Hypothesis]:
+    out: list[Hypothesis] = []
+
+    for fn in functions:
+        blob = _joined([
+            fn.contract,
+            fn.name,
+            fn.state_blob,
+            *fn.reads,
+            *fn.writes,
+            *fn.external_calls,
+            fn.body,
+        ])
+
+        oracle_like = any(
+            term in blob
+            for term in (
+                "oracle",
+                "chainlink",
+                "aggregator",
+                "feed",
+                "latestrounddata",
+                "roundid",
+                "answer",
+                "updatedat",
+                "answeredinround",
+                "price",
+            )
+        )
+
+        value_sensitive = any(
+            term in blob
+            for term in (
+                "borrow",
+                "debt",
+                "collateral",
+                "liquidat",
+                "mint",
+                "redeem",
+                "valuation",
+                "priced",
+                "maxborrow",
+            )
+        )
+
+        if not (fn.is_public_entrypoint and oracle_like and value_sensitive):
+            continue
+
+        has_freshness_guard = any(
+            guard in blob
+            for guard in (
+                "block.timestamp - updatedat",
+                "updatedat >",
+                "updatedat>",
+                "updatedat +",
+                "maxstaleness",
+                "max_staleness",
+                "heartbeat",
+                "answeredinround >= roundid",
+                "answeredinround>=roundid",
+                "roundid <= answeredinround",
+                "answer > 0",
+                "price > 0",
+            )
+        )
+
+        if has_freshness_guard:
+            continue
+
+        out.append(
+            Hypothesis(
+                id=_hid("oracle-stale-price", fn.fq_name),
+                title="Oracle price may be used without freshness or round validation",
+                severity_guess="high",
+                confidence=0.68,
+                affected_contracts=[fn.contract],
+                related_functions=[fn.fq_name],
+                related_state=sorted(set([*fn.reads, *fn.writes])),
+                invariant="Oracle-dependent value calculations should reject stale, incomplete, negative, or invalid round data before minting, borrowing, redeeming, or liquidating.",
+                attack_preconditions=[
+                    "The protocol relies on latestRoundData-style oracle values for value-sensitive accounting.",
+                    "The oracle answer can become stale, incomplete, negative, or otherwise invalid while still being accepted.",
+                ],
+                exploit_sketch=[
+                    "Wait for or simulate stale oracle data that overvalues collateral or assets.",
+                    f"Call {fn.fq_name} while the stale price is accepted.",
+                    "Borrow, mint, redeem, or avoid liquidation using the outdated valuation.",
+                ],
+                validation_steps=[
+                    "Check whether updatedAt freshness is bounded against block.timestamp.",
+                    "Check whether answeredInRound, roundId, and positive answer constraints are enforced.",
+                    "Write a Foundry test with stale updatedAt and inflated answer values.",
+                ],
+                contest_validity_notes=[
+                    "Valid when stale accepted data can create fund loss, bad debt, unfair liquidation, or over-minting.",
+                    "Generic missing stale checks may be invalid unless tied to a concrete value-sensitive path.",
+                ],
+                evidence=[
+                    f"reads={fn.reads}",
+                    f"writes={fn.writes}",
+                    f"external_calls={fn.external_calls}",
+                ],
+                tags=["oracle", "stale-price", "chainlink", "valuation"],
+            )
+        )
+
+    return out
+
+
+def _generate_v41(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[Hypothesis]:
+    functions = _extract_functions(analysis)
+    hypotheses = list(_ORIGINAL_GENERATE_V41(self, analysis))
+    hypotheses.extend(_v41_stale_oracle_price_hypotheses(functions))
+    return _rank_hypotheses(_precision_filter(_dedupe_hypotheses(hypotheses)))
+
+
+HypothesisEngine.generate = _generate_v41

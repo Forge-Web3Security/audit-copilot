@@ -297,3 +297,24 @@ def test_v40_filters_obvious_fixture_helper_noise():
     assert not any(item.startswith("asset-move-no-auth:mockerc20") for item in ids)
     assert not any(item.startswith("share-manipulation:mockerc20") for item in ids)
     assert not any(item.startswith("accounting-no-assets:vulnerablevault-converttoshares") for item in ids)
+
+
+def test_v41_detects_stale_oracle_price_usage_even_when_contract_name_contains_stale():
+    analysis = {
+        "transitions": [
+            {
+                "contract": "StaleOracleLendingMarket",
+                "function": "borrow",
+                "visibility": "external",
+                "reads_storage": ["collateralOracle", "collateralDeposits", "debt"],
+                "writes_storage": ["debt"],
+                "external_calls": [],
+                "auth_requirements": [],
+                "asset_movements": [],
+            }
+        ]
+    }
+
+    ids = {h.id for h in generate_hypotheses(analysis)}
+
+    assert "oracle-stale-price:staleoraclelendingmarket-borrow" in ids
