@@ -124,6 +124,6 @@ def test_exploit_fixture_manifest_paths_exist():
 def test_exploit_fixture_manifest_passes_required_and_forbidden_checks():
     summary = run_benchmark_manifest(ROOT / "examples" / "exploit_fixtures" / "manifest.json")
 
-    assert summary.total == 12
+    assert summary.total == 13
     assert summary.failed == 0
     assert summary.passed == summary.total
