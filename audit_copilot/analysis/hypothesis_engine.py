@@ -584,6 +584,21 @@ def _precision_filter(hypotheses: list[Hypothesis]) -> list[Hypothesis]:
             if entitlement_shaped and has_user_accounting:
                 continue
 
+        if hid.startswith("missing-access-control:") and "initialize" in fn_text:
+            has_initializer_guard = any(
+                k in state_text or k in evidence_text
+                for k in (
+                    "initialized",
+                    "_initialized",
+                    "hasinitialized",
+                    "has_initialized",
+                    "already_initialized",
+                    "alreadyinitialized",
+                )
+            )
+            if has_initializer_guard:
+                continue
+
         if hid.startswith("external-call-order:") and "deposit" in fn_text and "transferfrom" in evidence_text:
             h = h.model_copy(update={"severity_guess": "medium", "confidence": min(h.confidence, 0.48)})
 
@@ -1725,3 +1740,116 @@ def _generate_v41(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[H
 
 
 HypothesisEngine.generate = _generate_v41
+
+# --- v4.2 initializer takeover detector ---
+
+_ORIGINAL_GENERATE_V42 = HypothesisEngine.generate
+
+
+def _v42_initializer_takeover_hypotheses(functions: list[FunctionSignal]) -> list[Hypothesis]:
+    out: list[Hypothesis] = []
+
+    sensitive_state_terms = (
+        "owner",
+        "admin",
+        "governance",
+        "governor",
+        "guardian",
+        "operator",
+        "keeper",
+        "role",
+        "authority",
+        "implementation",
+        "proxy",
+        "pauser",
+        "treasury",
+        "oracle",
+    )
+
+    guard_terms = (
+        "initialized",
+        "_initialized",
+        "hasinitialized",
+        "has_initialized",
+        "already_initialized",
+        "alreadyinitialized",
+        "require(!initialized",
+        "require(!_initialized",
+    )
+
+    for fn in functions:
+        fn_name = fn.name.lower()
+        blob = _joined([
+            fn.state_blob,
+            *fn.reads,
+            *fn.writes,
+            *fn.modifiers,
+            fn.body,
+        ])
+
+        is_initializer_name = fn_name in ("initialize", "init") or "initialize" in fn_name
+        writes_sensitive_state = any(term in _joined(fn.writes) for term in sensitive_state_terms)
+        has_initializer_guard = any(term in blob for term in guard_terms)
+        has_auth = fn.has_auth
+
+        if not fn.is_public_entrypoint:
+            continue
+
+        if not is_initializer_name:
+            continue
+
+        if not writes_sensitive_state:
+            continue
+
+        if has_auth or has_initializer_guard:
+            continue
+
+        out.append(
+            Hypothesis(
+                id=_hid("initializer-takeover", fn.fq_name),
+                title="Initializer may be callable without one-time initialization protection",
+                severity_guess="high",
+                confidence=0.74,
+                affected_contracts=[fn.contract],
+                related_functions=[fn.fq_name],
+                related_state=sorted(set([*fn.reads, *fn.writes])),
+                invariant="Initialization functions that assign privileged state must only run once and must not be callable by arbitrary users after deployment.",
+                attack_preconditions=[
+                    "The initializer is public or external.",
+                    "The initializer writes owner/admin/role/governance or other privileged control state.",
+                    "No one-time initialized/reinitializer guard or authorization check was detected.",
+                ],
+                exploit_sketch=[
+                    f"Call {fn.fq_name} from an arbitrary address after deployment.",
+                    "Set owner/admin/governance or other privileged state to the attacker.",
+                    "Use the gained privilege to drain funds, upgrade logic, pause withdrawals, or alter protocol parameters.",
+                ],
+                validation_steps=[
+                    "Confirm whether deployment calls the initializer atomically.",
+                    "Check whether the initializer has initializer/reinitializer/initialized guard logic.",
+                    "Write a Foundry test where a random address calls initialize after deployment.",
+                ],
+                contest_validity_notes=[
+                    "Strong when an untrusted user can claim ownership or privileged roles after deployment.",
+                    "May be invalid if deployment guarantees atomic initialization and no uninitialized instance can exist in scope.",
+                ],
+                evidence=[
+                    f"writes={fn.writes}",
+                    f"modifiers={fn.modifiers}",
+                    f"auth={fn.authorization_hints}",
+                ],
+                tags=["initializer", "access-control", "ownership", "takeover"],
+            )
+        )
+
+    return out
+
+
+def _generate_v42(self: HypothesisEngine, analysis: Mapping[str, Any]) -> list[Hypothesis]:
+    functions = _extract_functions(analysis)
+    hypotheses = list(_ORIGINAL_GENERATE_V42(self, analysis))
+    hypotheses.extend(_v42_initializer_takeover_hypotheses(functions))
+    return _rank_hypotheses(_precision_filter(_dedupe_hypotheses(hypotheses)))
+
+
+HypothesisEngine.generate = _generate_v42

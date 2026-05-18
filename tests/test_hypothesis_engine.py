@@ -318,3 +318,45 @@ def test_v41_detects_stale_oracle_price_usage_even_when_contract_name_contains_s
     ids = {h.id for h in generate_hypotheses(analysis)}
 
     assert "oracle-stale-price:staleoraclelendingmarket-borrow" in ids
+
+
+def test_v42_detects_initializer_takeover():
+    analysis = {
+        "transitions": [
+            {
+                "contract": "UninitializedOwnership",
+                "function": "initialize",
+                "visibility": "external",
+                "reads_storage": [],
+                "writes_storage": ["owner"],
+                "external_calls": [],
+                "auth_requirements": [],
+                "asset_movements": [],
+            }
+        ]
+    }
+
+    ids = {h.id for h in generate_hypotheses(analysis)}
+
+    assert "initializer-takeover:uninitializedownership-initialize" in ids
+
+
+def test_v42_does_not_flag_guarded_initializer():
+    analysis = {
+        "transitions": [
+            {
+                "contract": "ProtectedInitializer",
+                "function": "initialize",
+                "visibility": "external",
+                "reads_storage": ["initialized"],
+                "writes_storage": ["initialized", "owner"],
+                "external_calls": [],
+                "auth_requirements": [],
+                "asset_movements": [],
+            }
+        ]
+    }
+
+    ids = {h.id for h in generate_hypotheses(analysis)}
+
+    assert "initializer-takeover:protectedinitializer-initialize" not in ids
